@@ -18,6 +18,9 @@ export interface LoadProgress {
   season: number;
   day: number;
   lastMs: number;
+  record?: string;
+  last?: string;
+  stage?: string;
 }
 export interface LoadResult {
   days: number;

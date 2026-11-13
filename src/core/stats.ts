@@ -63,6 +63,18 @@ export function fourFactors(t: TeamTotals) {
   };
 }
 
+/**
+ * Victorias añadidas (VA): victorias que aporta un jugador por encima de un jugador de reemplazo
+ * (el nivel de un suplente que cualquier club puede fichar sin coste). Un equipo entero de reemplazo
+ * ganaría un REPLACEMENT_WIN_PCT de sus partidos, así que en sus minutos aportaría:
+ *   WS_reemplazo_i = REPLACEMENT_WIN_PCT · partidos del equipo · (segundos_i / segundos de jugador del equipo)
+ *   VA_i = WS_i − WS_reemplazo_i
+ */
+export const REPLACEMENT_WIN_PCT = 0.2;
+export function winsAdded(ws: number, sec: number, teamGames: number, teamSec: number): number {
+  return teamSec > 0 ? ws - (REPLACEMENT_WIN_PCT * teamGames * sec) / teamSec : 0;
+}
+
 /** Constante de puntos por victoria (ver winShares). */
 export const WS_K = 0.42;
 

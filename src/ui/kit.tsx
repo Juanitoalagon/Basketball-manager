@@ -1,6 +1,7 @@
 /** Piezas comunes de la interfaz: datos asíncronos, tablas ordenables, pestañas y formatos. */
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { call } from '../db/client';
+import { COUNTRY_LABEL, CUPO_RULES, cupoOf } from '../core/names';
 
 export const f0 = (x: number | null | undefined) => (x === null || x === undefined || !Number.isFinite(x) ? '—' : Math.round(x).toLocaleString('es-ES'));
 export const f1 = (x: number | null | undefined) => (x === null || x === undefined || !Number.isFinite(x) ? '—' : x.toLocaleString('es-ES', { minimumFractionDigits: 1, maximumFractionDigits: 1 }));
@@ -122,6 +123,27 @@ export function Tag({ kind }: { kind: 'sim' | 'real' | 'est' }) {
   return <span className={`tag ${kind}`} title={t[1]}>{t[0]}</span>;
 }
 
+const CUPO_TXT = { NAC: ['NAC', 'Nacional (jugador de formación española)'], COM: ['COM', 'Comunitario o asimilado: no ocupa plaza de extracomunitario'], EXT: ['EXT', 'Extracomunitario: máximo ' + CUPO_RULES.maxExt + ' por plantilla'] } as const;
+/** Etiqueta de cupo (NAC / COM / EXT) con color propio. */
+export function CupoTag({ nationality, full }: { nationality: string; full?: boolean }) {
+  const c = cupoOf(nationality);
+  return (
+    <span className={`cupo ${c.toLowerCase()}`} title={`${CUPO_TXT[c][1]} · ${COUNTRY_LABEL[nationality] ?? nationality}`}>
+      {CUPO_TXT[c][0]}{full ? ` · ${COUNTRY_LABEL[nationality] ?? nationality}` : ''}
+    </span>
+  );
+}
+/** Resumen de cupos de una plantilla, en rojo si incumple. */
+export function CupoSummary({ cupo }: { cupo: { NAC: number; COM: number; EXT: number } }) {
+  return (
+    <div className="cupos">
+      <span className={cupo.NAC < CUPO_RULES.minNac ? 'bad' : ''}><span className="cupo nac">NAC</span> {cupo.NAC} <small>(mín. {CUPO_RULES.minNac})</small></span>
+      <span><span className="cupo com">COM</span> {cupo.COM}</span>
+      <span className={cupo.EXT > CUPO_RULES.maxExt ? 'bad' : ''}><span className="cupo ext">EXT</span> {cupo.EXT} <small>(máx. {CUPO_RULES.maxExt})</small></span>
+    </div>
+  );
+}
+
 export function Back({ onBack, label = 'Volver' }: { onBack: () => void; label?: string }) {
   return (
     <button className="back" onClick={onBack}>
@@ -134,5 +156,6 @@ export type Nav = {
   player: (id: number) => void;
   game: (id: number) => void;
   club: (id: number) => void;
+  live: () => void;
   back: () => void;
 };

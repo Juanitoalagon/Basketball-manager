@@ -11,13 +11,31 @@ import type { Line } from '../core/stats';
 import { call, cancelLoad, setProgressListener } from '../db/client';
 import type { AdvanceResult, LoadProgress } from '../db/protocol';
 import { DotMap, ZoneMap } from './ShotMap';
-import { Back, type Col, Loading, type Nav, Table, Tabs, Tag, clock, f0, f1, f2, mins, pc, pcRaw, seasonLabel, signed, useData } from './kit';
+import { ContractCard, FinanceScreen, NewsList, eur } from './market';
+import type { Level, Role, Tactics } from '../core/engine';
+import { Face, parseColors } from './Face';
+import { TrainingScreen, YouthScreen } from './club';
+import { Back, type Col, CupoSummary, CupoTag, Loading, type Nav, Table, Tabs, Tag, clock, f0, f1, f2, mins, pc, pcRaw, seasonLabel, signed, useData } from './kit';
 
 type HomeData = NonNullable<ReturnType<typeof Q.home>> & { club: NonNullable<ReturnType<typeof Q.home>>['club'] };
 type GameRow = Q.GameListRow;
 
 const per = (l: Line, k: keyof Line) => (l.gp ? (l[k] as number) / l.gp : null);
-const stageLabel = (s: string) => (s === 'playoffs' ? 'Playoffs' : 'Liga regular');
+const STAGE_LABEL: Record<string, string> = { regular: 'Liga regular', playoffs: 'Playoffs', copa: 'Copa del Rey', grupos: 'Fase de grupos', eliminatoria: 'Eliminatoria' };
+const stageLabel = (s: string) => STAGE_LABEL[s] ?? s;
+const COMP_NAME: Record<number, string> = { 1: 'Liga ACB', 2: 'Primera FEB', 3: 'Copa del Rey', 4: 'EuroLeague', 5: 'EuroCup', 6: 'Basketball Champions League' };
+const COMP_SHORT: Record<number, string> = { 1: 'ACB', 2: 'FEB', 3: 'Copa', 4: 'EL', 5: 'EC', 6: 'BCL' };
+const roundLabel = (stage: string, day: number, round?: number | null) =>
+  stage === 'regular' ? `J${round ?? day}` : stage === 'grupos' ? `J${Math.round(day / 2)}` : stage === 'playoffs' ? 'PO' : 'Elim.';
+/** Etiqueta corta de un partido: competición (si no es la liga) y jornada. */
+export function GameTag({ comp, stage, day, round }: { comp: number; stage: string; day: number; round?: number | null }) {
+  return (
+    <span className="muted">
+      {comp >= 3 && <span className={`compbadge c${comp}`}>{COMP_SHORT[comp]}</span>}
+      {roundLabel(stage, day, round)}
+    </span>
+  );
+}
 
 function Result({ g, clubId }: { g: GameRow; clubId?: number | null }) {
   const played = g.status === 'jugado';
@@ -106,14 +124,15 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
         <h3>Próximo partido</h3>
         {data.next ? (
           <p className="tap" onClick={() => nav.club(data.next!.home_id === data.club!.id ? data.next!.away_id : data.next!.home_id)}>
-            {stageLabel(data.next.stage)} · día {data.next.day} · {data.next.home_id === data.club.id ? `contra ${data.next.away} (en casa)` : `en la pista de ${data.next.home}`}
+            <GameTag comp={data.next.competition_id} stage={data.next.stage} day={data.next.day} round={data.next.round} /> {stageLabel(data.next.stage)} · día {data.next.day} · {data.next.home_id === data.club.id ? `contra ${data.next.away} (en casa)` : `en la pista de ${data.next.home}`}
           </p>
         ) : (
           <p className="muted">{u.phase === 'fin' ? 'La temporada ha terminado.' : u.phase === 'playoffs' ? 'Tu equipo no juega estos playoffs. Puedes seguir simulando.' : 'Sin partidos pendientes.'}</p>
         )}
         {playing && (
           <div className="row">
-            <button disabled={!!busy || data.nextDay === null && u.phase !== 'regular'} onClick={() => go('day')}>Jugar siguiente jornada</button>
+            {data.next && data.nextDay === data.next.day && <button disabled={!!busy} onClick={nav.live}>▶ Jugar en directo</button>}
+            <button className={data.next && data.nextDay === data.next.day ? 'sec' : ''} disabled={!!busy || data.nextDay === null && u.phase !== 'regular'} onClick={() => go('day')}>Simular jornada</button>
             <button className="sec" disabled={!!busy} onClick={() => go('week')}>5 jornadas</button>
             {u.phase === 'regular' && <button className="sec" disabled={!!busy} onClick={() => go('regular')}>Hasta los playoffs</button>}
             <button className="sec" disabled={!!busy} onClick={() => go('season')}>Hasta el final</button>
@@ -124,16 +143,23 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
             <button disabled={!!busy} onClick={newSeason}>Empezar temporada {seasonLabel(u.game_season + 1)}</button>
           </div>
         )}
+        {u.phase === 'fin' && (
+          <p className="muted small">Antes de empezar, renueva en Equipo › Finanzas a quien quieras conservar: los contratos que terminan quedan libres. Puedes fichar agentes libres en Jugadores.</p>
+        )}
         {busy && (
           <div className="row">
-            <span className="muted">Simulando… {progress ? `día ${progress.day}` : ''}</span>
+            <span className="live">
+              Simulando… {progress ? (progress.stage === 'playoffs' ? `playoffs, día ${progress.day}` : `jornada ${progress.day}`) : ''}
+              {progress?.record && <b> · {progress.record}</b>}
+              {progress?.last && <span className="muted"> · {progress.last}</span>}
+            </span>
             <button className="sec" onClick={cancelLoad}>Detener</button>
           </div>
         )}
         {data.result.length > 0 && (
           <ul className="plain">
             {data.result.map((r) => (
-              <li key={r.competition_id}>{r.competition_id === 1 ? 'Liga ACB' : 'Primera FEB'}: {r.champion ? <b>campeón {r.champion}</b> : <>líder de la fase regular {r.first}</>}</li>
+              <li key={r.competition_id}>{COMP_NAME[r.competition_id] ?? ''}: {r.champion ? <b>campeón {r.champion}</b> : <>líder de la fase regular {r.first}</>}</li>
             ))}
           </ul>
         )}
@@ -145,7 +171,7 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
           <ul className="plain">
             {userGames.slice(-6).reverse().map((g) => (
               <li key={g.id} className="tap" onClick={() => nav.game(g.id)}>
-                {g.home} <b>{g.homePts}-{g.awayPts}</b> {g.away} ›
+                {g.comp >= 3 && <span className={`compbadge c${g.comp}`}>{COMP_SHORT[g.comp]}</span>}{g.home} <b>{g.homePts}-{g.awayPts}</b> {g.away} ›
               </li>
             ))}
             {events.map((e, i) => (
@@ -155,13 +181,15 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
         </section>
       )}
 
+      <NewsList clubId={data.club.id} nav={nav} />
+
       <section>
         <h3>Últimos resultados</h3>
         {data.last.length === 0 ? <p className="muted">Aún no se ha jugado ningún partido.</p> : (
           <ul className="plain">
             {data.last.map((g) => (
               <li key={g.id} className="tap" onClick={() => nav.game(g.id)}>
-                <span className="muted">{g.stage === 'playoffs' ? 'PO' : `J${g.day}`}</span> <Result g={g} clubId={data.club!.id} /> ›
+                <GameTag comp={g.competition_id} stage={g.stage} day={g.day} round={g.round} /> <Result g={g} clubId={data.club!.id} /> ›
               </li>
             ))}
           </ul>
@@ -195,14 +223,38 @@ type SquadRow = SquadData['players'][number];
 type Group = 'basic' | 'shoot' | 'adv' | 'bio';
 
 export function SquadScreen({ clubId, nav, isMine, onBack }: { clubId: number; nav: Nav; isMine: boolean; onBack?: () => void }) {
+  type V = 'plantilla' | 'quinteto' | 'entreno' | 'cantera' | 'finanzas';
+  const [view, setView] = useState<V>('plantilla');
+  if (isMine && !onBack) {
+    return (
+      <div>
+        <Tabs<V> value={view} onChange={setView} options={[['plantilla', 'Plantilla'], ['quinteto', 'Quinteto'], ['entreno', 'Entreno'], ['cantera', 'Cantera'], ['finanzas', 'Finanzas']]} />
+        {view === 'plantilla' ? <SquadTable clubId={clubId} nav={nav} /> : view === 'quinteto' ? <LineupEditor clubId={clubId} nav={nav} /> : view === 'entreno' ? <TrainingScreen clubId={clubId} /> : view === 'cantera' ? <YouthScreen clubId={clubId} nav={nav} /> : <FinanceScreen clubId={clubId} nav={nav} />}
+      </div>
+    );
+  }
+  return <SquadTable clubId={clubId} nav={nav} onBack={onBack} />;
+}
+
+function SquadTable({ clubId, nav, onBack }: { clubId: number; nav: Nav; onBack?: () => void }) {
   const { data, error } = useData<SquadData>('squad', { clubId }, [clubId]);
   const [group, setGroup] = useState<Group>('basic');
   if (!data) return <Loading error={error} />;
   const L = (r: SquadRow) => r.line;
   const pg = (k: keyof Line) => (r: SquadRow) => (L(r) ? per(L(r)!, k) : null);
-  const base: Col<SquadRow>[] = [{ key: 'name', label: 'Jugador', left: true, value: (r) => r.name, render: (r) => <><span className="num">{r.number ?? ''}</span> {r.name}</> }];
+  const spanish = data.club.country === 'ES';
+  const base: Col<SquadRow>[] = [{
+    key: 'name', label: 'Jugador', left: true, value: (r) => r.name,
+    render: (r) => (
+      <span className="pname">
+        {r.origin !== 'real' && <Face id={r.id} nationality={r.nationality} age={r.age} colors={data.club.colors} size={22} />}
+        <span><span className="num">{r.number ?? ''}</span> {spanish && <CupoTag nationality={r.nationality} />} {r.name}{r.injury_games > 0 && <span className="bad" title={r.injury ?? ''}> ✚</span>}</span>
+      </span>
+    ),
+  }];
   const groups: Record<Group, Col<SquadRow>[]> = {
     basic: [
+      { key: 'pos', label: 'Pos.', value: (r) => r.pos1, render: (r) => `${r.pos1}${r.pos2 ? `/${r.pos2}` : ''}` },
       { key: 'gp', label: 'PJ', value: (r) => L(r)?.gp ?? 0 },
       { key: 'min', label: 'MIN', value: (r) => (L(r) ? L(r)!.sec / 60 / L(r)!.gp : null), render: (r) => (L(r) ? mins(L(r)!.sec, L(r)!.gp) : '—') },
       { key: 'pts', label: 'PTS', value: pg('pts'), render: (r) => f1(pg('pts')(r)) },
@@ -216,9 +268,11 @@ export function SquadScreen({ clubId, nav, isMine, onBack }: { clubId: number; n
     shoot: [
       { key: 'fg', label: 'TC%', value: (r) => (L(r) && fga(L(r)!) ? fgm(L(r)!) / fga(L(r)!) : null), render: (r) => (L(r) ? pc(fga(L(r)!) ? fgm(L(r)!) / fga(L(r)!) : null) : '—') },
       { key: 't2', label: 'T2', value: (r) => L(r)?.fga2 ?? 0, render: (r) => (L(r) ? `${L(r)!.fgm2}/${L(r)!.fga2}` : '—') },
+      { key: 't2p', label: 'T2%', value: (r) => (L(r)?.fga2 ? L(r)!.fgm2 / L(r)!.fga2 : null), render: (r) => pc(L(r)?.fga2 ? L(r)!.fgm2 / L(r)!.fga2 : null) },
       { key: 't3', label: 'T3', value: (r) => L(r)?.fga3 ?? 0, render: (r) => (L(r) ? `${L(r)!.fgm3}/${L(r)!.fga3}` : '—') },
       { key: 't3p', label: 'T3%', value: (r) => (L(r)?.fga3 ? L(r)!.fgm3 / L(r)!.fga3 : null), render: (r) => pc(L(r)?.fga3 ? L(r)!.fgm3 / L(r)!.fga3 : null) },
-      { key: 'ftp', label: 'TL%', value: (r) => (L(r)?.fta ? L(r)!.ftm / L(r)!.fta : null), render: (r) => pc(L(r)?.fta ? L(r)!.ftm / L(r)!.fta : null) },
+      { key: 't1', label: 'T1', value: (r) => L(r)?.fta ?? 0, render: (r) => (L(r) ? `${L(r)!.ftm}/${L(r)!.fta}` : '—') },
+      { key: 'ftp', label: 'T1%', value: (r) => (L(r)?.fta ? L(r)!.ftm / L(r)!.fta : null), render: (r) => pc(L(r)?.fta ? L(r)!.ftm / L(r)!.fta : null) },
       { key: 'efg', label: 'eFG%', value: (r) => L(r)?.efg ?? null, render: (r) => pc(L(r)?.efg) },
       { key: 'ts', label: 'TS%', value: (r) => L(r)?.ts ?? null, render: (r) => pc(L(r)?.ts) },
     ],
@@ -231,6 +285,7 @@ export function SquadScreen({ clubId, nav, isMine, onBack }: { clubId: number; n
       { key: 'dws', label: 'DWS', value: (r) => L(r)?.dws ?? null, render: (r) => f1(L(r)?.dws) },
       { key: 'ws', label: 'WS', value: (r) => L(r)?.ws ?? null, render: (r) => f1(L(r)?.ws) },
       { key: 'ws40', label: 'WS/40', value: (r) => L(r)?.ws40 ?? null, render: (r) => (L(r) ? f2(L(r)!.ws40) : '—') },
+      { key: 'va', label: 'VA', title: 'Victorias añadidas sobre un jugador de reemplazo', value: (r) => L(r)?.va ?? null, render: (r) => f1(L(r)?.va) },
       { key: 'pm', label: '+/-', value: (r) => L(r)?.pm ?? null, render: (r) => (L(r) ? signed(L(r)!.pm) : '—') },
     ],
     bio: [
@@ -239,34 +294,46 @@ export function SquadScreen({ clubId, nav, isMine, onBack }: { clubId: number; n
       { key: 'h', label: 'Altura', value: (r) => r.height_cm, render: (r) => `${(r.height_cm / 100).toFixed(2).replace('.', ',')}` },
       { key: 'ovr', label: 'Media', value: (r) => r.ovr },
       { key: 'pot', label: 'Pot.', title: 'Potencial estimado por tus ojeadores', value: (r) => r.potential_est },
-      { key: 'nat', label: 'Nac.', value: (r) => r.nationality },
+      { key: 'mor', label: 'Moral', value: (r) => r.morale, render: (r) => <span className={r.morale >= 60 ? 'good' : r.morale < 40 ? 'bad' : ''}>{r.morale}</span> },
+      { key: 'sal', label: 'Sueldo', value: (r) => r.salary ?? 0, render: (r) => eur(r.salary) },
+      { key: 'until', label: 'Hasta', value: (r) => r.until ?? 0, render: (r) => (r.until ? seasonLabel(r.until) : '—') },
+      { key: 'inj', label: 'Estado', value: (r) => r.injury_games, render: (r) => (r.injury_games ? <span className="bad">✚ {r.injury} ({r.injury_games})</span> : 'Disponible') },
+      { key: 'nat', label: 'Nac.', value: (r) => r.nationality, render: (r) => <CupoTag nationality={r.nationality} full /> },
     ],
   };
   return (
     <div>
       {onBack && <Back onBack={onBack} />}
       <section className="hero">
+        <ClubBand colors={data.club.colors} />
         <div className="muted">{data.club.comp} · {seasonLabel(data.season)}</div>
         <h2>{data.club.name}</h2>
+        {spanish && <CupoSummary cupo={data.cupo} />}
       </section>
       <Tabs<Group> small value={group} onChange={setGroup} options={[['basic', 'Básicas'], ['shoot', 'Tiro'], ['adv', 'Avanzadas'], ['bio', 'Ficha']]} />
       <Table cols={[...base, ...groups[group]]} rows={data.players} rowKey={(r) => r.id} onRow={(r) => nav.player(r.id)} defaultSort={group === 'bio' ? { key: 'ovr', desc: true } : null} />
-      <p className="muted">Por partido, fase regular. <Tag kind="sim" /> {isMine ? 'Toca un jugador para ver su ficha.' : ''}</p>
+      <p className="muted">Por partido, fase regular. <Tag kind="sim" /> Toca un jugador para ver su ficha.</p>
+      {group === 'adv' && <Glossary />}
     </div>
   );
+}
+
+export function ClubBand({ colors }: { colors: string | null | undefined }) {
+  const c = parseColors(colors);
+  return <div className="club-band" style={{ background: `linear-gradient(90deg, ${c[0]} 0 55%, ${c[1]} 55% 80%, ${c[2]} 80%)` }} />;
 }
 
 /* ───────────────────────────── Ficha de jugador ───────────────────────────── */
 
 type PlayerData = ReturnType<typeof Q.playerDetail>;
-type PTab = 'res' | 'attr' | 'stats' | 'log' | 'map';
+type PTab = 'res' | 'attr' | 'stats' | 'log' | 'map' | 'real';
 
 function attrClass(v: number) {
   return v >= 80 ? 'a4' : v >= 65 ? 'a3' : v >= 50 ? 'a2' : v >= 35 ? 'a1' : 'a0';
 }
 
-export function PlayerScreen({ id, nav }: { id: number; nav: Nav }) {
-  const { data, error } = useData<PlayerData>('player', { id }, [id]);
+export function PlayerScreen({ id, nav, myClub, onChanged }: { id: number; nav: Nav; myClub: number; onChanged: () => void }) {
+  const { data, error, reload } = useData<PlayerData>('player', { id }, [id]);
   const [tab, setTab] = useState<PTab>('res');
   if (!data) return <Loading error={error} />;
   const p = data.player as Record<string, string | number | null>;
@@ -276,24 +343,32 @@ export function PlayerScreen({ id, nav }: { id: number; nav: Nav }) {
     <div>
       <Back onBack={nav.back} />
       <section className="hero">
-        <div className="muted tap" onClick={() => p.club_id && nav.club(Number(p.club_id))}>
-          {p.number !== null ? `#${p.number} · ` : ''}{p.club ?? 'Sin club'} · {POS_LABEL[p.pos1 as Pos]}{p.pos2 ? ` / ${POS_LABEL[p.pos2 as Pos]}` : ''}
+        <ClubBand colors={(p.club_colors as string | null) ?? null} />
+        <div className="phead">
+          {p.origin !== 'real' && <Face id={id} nationality={String(p.nationality)} age={data.age} colors={(p.club_colors as string | null) ?? null} size={64} />}
+          <div>
+            <div className="muted tap" onClick={() => p.club_id && nav.club(Number(p.club_id))}>
+              {p.number !== null ? `#${p.number} · ` : ''}{p.club ?? (p.youth_club ? `Cantera · ${p.youth_club}` : 'Sin club')} · {POS_LABEL[p.pos1 as Pos]}{p.pos2 ? ` / ${POS_LABEL[p.pos2 as Pos]}` : ''}
+            </div>
+            <h2>{p.name}</h2>
+          </div>
         </div>
-        <h2>{p.name}</h2>
         <div className="chips">
           <span>{data.age} años</span>
           <span>{(Number(p.height_cm) / 100).toFixed(2).replace('.', ',')} m</span>
           <span>{p.weight_kg} kg</span>
           <span>Env. {(Number(p.wingspan_cm) / 100).toFixed(2).replace('.', ',')} m</span>
-          <span>{COUNTRY_LABEL[String(p.nationality)] ?? p.nationality}</span>
+          <span><CupoTag nationality={String(p.nationality)} full /></span>
           <span>{p.hand === 'L' ? 'Zurdo' : 'Diestro'}</span>
         </div>
         <div className="big">
           {data.ovr} <span className="muted small">media{data.prevOvr !== null ? ` (${signed(data.ovr - data.prevOvr)})` : ''} · potencial estimado {p.potential_est}</span>
         </div>
-        <p className="muted small">Jugador generado <Tag kind="est" /> · estadísticas <Tag kind="sim" /></p>
+        {p.origin === 'real'
+          ? <p className="muted small">Jugador real <Tag kind="real" /> · atributos, edad y altura <Tag kind="est" /> · estadísticas del juego <Tag kind="sim" /></p>
+          : <p className="muted small">Jugador generado <Tag kind="est" /> · estadísticas <Tag kind="sim" /></p>}
       </section>
-      <Tabs<PTab> small value={tab} onChange={setTab} options={[['res', 'Resumen'], ['attr', 'Atributos'], ['stats', 'Estadísticas'], ['log', 'Partidos'], ['map', 'Mapa de tiro']]} />
+      <Tabs<PTab> small value={tab} onChange={setTab} options={[['res', 'Resumen'], ['attr', 'Atributos'], ['stats', 'Estadísticas'], ['log', 'Partidos'], ['map', 'Mapa de tiro'], ...(p.origin === 'real' ? [['real', 'Datos reales'] as [PTab, string]] : [])]} />
 
       {tab === 'res' && (
         <section>
@@ -302,12 +377,16 @@ export function PlayerScreen({ id, nav }: { id: number; nav: Nav }) {
             <div className="kpis">
               {[
                 ['PTS', f1(reg.pts / reg.gp)], ['REB', f1(reb(reg) / reg.gp)], ['AST', f1(reg.ast / reg.gp)], ['MIN', mins(reg.sec, reg.gp)],
-                ['TS%', pc(reg.ts)], ['USG%', pcRaw(reg.usg)], ['VAL', f1(reg.pir / reg.gp)], ['WS', f1(reg.ws)],
+                ['T2%', pc(reg.fga2 ? reg.fgm2 / reg.fga2 : null)], ['T3%', pc(reg.fga3 ? reg.fgm3 / reg.fga3 : null)], ['T1%', pc(reg.fta ? reg.ftm / reg.fta : null)], ['TS%', pc(reg.ts)],
+                ['VAL', f1(reg.pir / reg.gp)], ['USG%', pcRaw(reg.usg)], ['WS', f1(reg.ws)], ['VA', f1(reg.va)],
               ].map(([k, v]) => (
                 <div key={k}><div className="kv">{v}</div><div className="kk">{k}</div></div>
               ))}
             </div>
           ) : <p className="muted">Todavía no ha jugado esta temporada.</p>}
+          <ContractCard id={id} myClub={myClub} injury={(p.injury as string | null) ?? null} onChanged={() => { reload(); onChanged(); }} />
+          <h3>Tendencias de tiro</h3>
+          <Tendencies natural={data.tendencies.natural} real={data.tendencies.real} shots={data.tendencies.shots} />
           <h3>Media en cada posición</h3>
           <div className="chips">
             {data.posOvr.map((x) => (
@@ -350,12 +429,15 @@ export function PlayerScreen({ id, nav }: { id: number; nav: Nav }) {
               { key: 'pts', label: 'PTS', value: (r) => r.line.pts / r.line.gp, render: (r) => f1(r.line.pts / r.line.gp) },
               { key: 'reb', label: 'REB', value: (r) => reb(r.line) / r.line.gp, render: (r) => f1(reb(r.line) / r.line.gp) },
               { key: 'ast', label: 'AST', value: (r) => r.line.ast / r.line.gp, render: (r) => f1(r.line.ast / r.line.gp) },
+              { key: 't2', label: 'T2%', value: (r) => (r.line.fga2 ? r.line.fgm2 / r.line.fga2 : null), render: (r) => pc(r.line.fga2 ? r.line.fgm2 / r.line.fga2 : null) },
               { key: 't3', label: 'T3%', value: (r) => (r.line.fga3 ? r.line.fgm3 / r.line.fga3 : null), render: (r) => pc(r.line.fga3 ? r.line.fgm3 / r.line.fga3 : null) },
+              { key: 't1', label: 'T1%', value: (r) => (r.line.fta ? r.line.ftm / r.line.fta : null), render: (r) => pc(r.line.fta ? r.line.ftm / r.line.fta : null) },
               { key: 'ts', label: 'TS%', value: (r) => r.line.ts, render: (r) => pc(r.line.ts) },
               { key: 'usg', label: 'USG%', value: (r) => r.line.usg, render: (r) => pcRaw(r.line.usg) },
               { key: 'pir', label: 'VAL', value: (r) => r.line.pir / r.line.gp, render: (r) => f1(r.line.pir / r.line.gp) },
               { key: 'ws', label: 'WS', value: (r) => r.line.ws, render: (r) => f1(r.line.ws) },
               { key: 'ws40', label: 'WS/40', value: (r) => r.line.ws40, render: (r) => f2(r.line.ws40) },
+              { key: 'va', label: 'VA', value: (r) => r.line.va, render: (r) => f1(r.line.va) },
               { key: 'src', label: 'Origen', value: () => 'sim', render: () => <Tag kind="sim" /> },
             ]}
             rows={data.career}
@@ -378,7 +460,7 @@ export function PlayerScreen({ id, nav }: { id: number; nav: Nav }) {
               { key: 'ast', label: 'AST', value: (r) => r.line.ast },
               { key: 't2', label: 'T2', value: (r) => r.line.fga2, render: (r) => `${r.line.fgm2}/${r.line.fga2}` },
               { key: 't3', label: 'T3', value: (r) => r.line.fga3, render: (r) => `${r.line.fgm3}/${r.line.fga3}` },
-              { key: 'tl', label: 'TL', value: (r) => r.line.fta, render: (r) => `${r.line.ftm}/${r.line.fta}` },
+              { key: 'tl', label: 'T1', value: (r) => r.line.fta, render: (r) => `${r.line.ftm}/${r.line.fta}` },
               { key: 'pir', label: 'VAL', value: (r) => pir(r.line) },
               { key: 'pm', label: '+/-', value: (r) => r.line.pm, render: (r) => signed(r.line.pm) },
             ]}
@@ -390,6 +472,7 @@ export function PlayerScreen({ id, nav }: { id: number; nav: Nav }) {
         </section>
       )}
 
+      {tab === 'real' && <RealData id={id} />}
       {tab === 'map' && <PlayerShotMap id={id} seasons={data.shotSeasons.length ? data.shotSeasons : [data.season]} />}
     </div>
   );
@@ -436,7 +519,7 @@ function MySchedule({ clubId, nav }: { clubId: number; nav: Nav }) {
       <ul className="plain games">
         {data.map((g) => (
           <li key={g.id} className={g.status === 'jugado' ? 'tap' : ''} onClick={g.status === 'jugado' ? () => nav.game(g.id) : undefined}>
-            <span className="muted">{g.stage === 'playoffs' ? 'PO' : `J${g.day}`}</span>
+            <GameTag comp={g.competition_id} stage={g.stage} day={g.day} round={g.round} />
             <span>{g.home_id === clubId ? 'vs' : 'en'} {g.home_id === clubId ? g.away : g.home}</span>
             <span>{g.status === 'jugado' ? <Result g={g} clubId={clubId} /> : <span className="muted">pendiente</span>}</span>
           </li>
@@ -456,16 +539,18 @@ function Rounds({ nav, clubId }: { nav: Nav; clubId: number }) {
     return day ?? lastPlayed?.day ?? days.data[0]!.day;
   }, [days.data, day]);
   const games = useData<GameRow[]>('dayGames', { comp, day: current }, [comp, current]);
+  const idx = days.data && current !== null ? days.data.findIndex((d) => d.day === current) : -1;
   return (
     <section>
-      <Tabs<string> small value={String(comp)} onChange={(v) => { setComp(Number(v)); setDay(null); }} options={[['1', 'Liga ACB'], ['2', 'Primera FEB']]} />
-      {days.data && current !== null && (
+      <Tabs<string> small value={String(comp)} onChange={(v) => { setComp(Number(v)); setDay(null); }} options={[['1', 'ACB'], ['2', 'FEB'], ['3', 'Copa'], ['4', 'EuroLeague'], ['5', 'EuroCup'], ['6', 'BCL']]} />
+      {days.data && days.data.length === 0 && <p className="muted">{comp === 3 ? 'La Copa se juega en los días 18-20, tras la primera vuelta.' : 'Esta competición no tiene partidos esta temporada.'}</p>}
+      {days.data && days.data.length > 0 && current !== null && (
         <div className="row">
-          <button className="sec" disabled={current <= days.data[0]!.day} onClick={() => setDay(current - 1)}>‹</button>
+          <button className="sec" disabled={idx <= 0} onClick={() => setDay(days.data![idx - 1]!.day)}>‹</button>
           <select value={current} onChange={(e) => setDay(Number(e.target.value))}>
-            {days.data.map((d) => (<option key={d.day} value={d.day}>{d.stage === 'playoffs' ? `Playoffs, día ${d.day}` : `Jornada ${d.day}`}{d.played === d.total ? '' : ' (pendiente)'}</option>))}
+            {days.data.map((d) => (<option key={d.day} value={d.day}>{d.stage === 'regular' ? `Jornada ${d.day}` : d.stage === 'grupos' ? `Jornada ${Math.round(d.day / 2)} (día ${d.day})` : `${stageLabel(d.stage)}, día ${d.day}`}{d.played === d.total ? '' : ' (pendiente)'}</option>))}
           </select>
-          <button className="sec" disabled={current >= days.data[days.data.length - 1]!.day} onClick={() => setDay(current + 1)}>›</button>
+          <button className="sec" disabled={idx >= days.data.length - 1} onClick={() => setDay(days.data![idx + 1]!.day)}>›</button>
         </div>
       )}
       {games.data ? (
@@ -489,7 +574,7 @@ type GameData = ReturnType<typeof Q.gameDetail>;
 type BoxRow = GameData['players'][number];
 const KIND_NAME = ['cerca del aro', 'en la pintura', 'de media distancia', 'de tres'];
 
-function pbpText(e: number[], names: Record<number, string>): string {
+export function pbpText(e: number[], names: Record<number, string>): string {
   const [type, , , , p1, p2, extra] = e as [number, number, number, number, number, number, number];
   const n = (id: number) => names[id] ?? '¿?';
   switch (type) {
@@ -510,6 +595,7 @@ function pbpText(e: number[], names: Record<number, string>): string {
     case EV.TOV: return `Pérdida de ${n(p1)}${p2 ? `, robo de ${n(p2)}` : ''}`;
     case EV.FOUL: return `Falta${extra ? ' en el tiro' : ''} de ${n(p1)} sobre ${n(p2)}`;
     case EV.SUB: return `Cambio: entra ${n(p1)} por ${n(p2)}`;
+    case EV.TIMEOUT: return 'Tiempo muerto';
     default: return '';
   }
 }
@@ -530,7 +616,7 @@ export function GameScreen({ id, nav }: { id: number; nav: Nav }) {
     { key: 'pts', label: 'PTS', value: (r) => r.line.pts },
     { key: 't2', label: 'T2', value: (r) => r.line.fga2, render: (r) => `${r.line.fgm2}/${r.line.fga2}` },
     { key: 't3', label: 'T3', value: (r) => r.line.fga3, render: (r) => `${r.line.fgm3}/${r.line.fga3}` },
-    { key: 'tl', label: 'TL', value: (r) => r.line.fta, render: (r) => `${r.line.ftm}/${r.line.fta}` },
+    { key: 'tl', label: 'T1', value: (r) => r.line.fta, render: (r) => `${r.line.ftm}/${r.line.fta}` },
     { key: 'reb', label: 'REB', value: (r) => reb(r.line), render: (r) => `${reb(r.line)} (${r.line.orb}+${r.line.drb})` },
     { key: 'ast', label: 'AST', value: (r) => r.line.ast },
     { key: 'stl', label: 'ROB', value: (r) => r.line.stl },
@@ -557,7 +643,7 @@ export function GameScreen({ id, nav }: { id: number; nav: Nav }) {
     <div>
       <Back onBack={nav.back} />
       <section className="hero score">
-        <div className="muted">{g.comp} · {stageLabel(g.stage)} · {g.stage === 'playoffs' ? `día ${g.day}` : `jornada ${g.day}`}</div>
+        <div className="muted">{g.comp} · {stageLabel(g.stage)} · {g.stage === 'regular' ? `jornada ${g.day}` : g.stage === 'grupos' ? `jornada ${Math.round(g.day / 2)}` : `día ${g.day}`}</div>
         <div className="sb">
           <span className="tap" onClick={() => nav.club(g.home_id)}>{g.home}</span>
           <b>{g.home_pts} - {g.away_pts}</b>
@@ -683,19 +769,30 @@ const LEADER_CATS: { key: string; label: string; value: (l: Q.PlayerLine) => num
   { key: 'blk', label: 'Tapones', value: (l) => l.blk / l.gp, fmt: f1 },
   { key: 'pir', label: 'Valoración', value: (l) => l.pir / l.gp, fmt: f1 },
   { key: 'ws', label: 'Win Shares', value: (l) => l.ws, fmt: f1 },
+  { key: 'va', label: 'Victorias añadidas', value: (l) => l.va, fmt: f1 },
   { key: 'ws40', label: 'WS por 40 min', value: (l) => l.ws40, fmt: f2, min: (l) => l.sec >= 60 * 200 },
   { key: 'ts', label: 'TS%', value: (l) => l.ts, fmt: pc, min: (l) => fga(l) >= l.gp * 4 },
+  { key: 't2', label: 'Tiros de 2 %', value: (l) => (l.fga2 ? l.fgm2 / l.fga2 : null), fmt: pc, min: (l) => l.fga2 >= l.gp * 3 },
   { key: 't3', label: 'Triples %', value: (l) => (l.fga3 ? l.fgm3 / l.fga3 : null), fmt: pc, min: (l) => l.fga3 >= l.gp * 1.5 },
-  { key: 'ft', label: 'Tiros libres %', value: (l) => (l.fta ? l.ftm / l.fta : null), fmt: pc, min: (l) => l.fta >= l.gp * 1.5 },
+  { key: 'ft', label: 'Tiros libres (T1) %', value: (l) => (l.fta ? l.ftm / l.fta : null), fmt: pc, min: (l) => l.fta >= l.gp * 1.5 },
   { key: 'usg', label: 'USG%', value: (l) => l.usg, fmt: pcRaw },
 ];
 
 export function LeagueScreen({ nav, myClub }: { nav: Nav; myClub: number }) {
   const [comp, setComp] = useState(1);
   const [tab, setTab] = useState<LTab>('table');
+  const compTabs: [string, string][] = [['1', 'ACB'], ['2', 'FEB'], ['3', 'Copa'], ['4', 'EuroLeague'], ['5', 'EuroCup'], ['6', 'BCL']];
+  if (comp >= 3) {
+    return (
+      <div>
+        <Tabs<string> value={String(comp)} onChange={(v) => setComp(Number(v))} options={compTabs} />
+        <CupView comp={comp} nav={nav} myClub={myClub} />
+      </div>
+    );
+  }
   return (
     <div>
-      <Tabs<string> value={String(comp)} onChange={(v) => setComp(Number(v))} options={[['1', 'Liga ACB'], ['2', 'Primera FEB']]} />
+      <Tabs<string> value={String(comp)} onChange={(v) => setComp(Number(v))} options={compTabs} />
       <Tabs<LTab> small value={tab} onChange={setTab} options={[['table', 'Clasificación'], ['leaders', 'Líderes'], ['teams', 'Equipos'], ['po', 'Playoffs'], ['hist', 'Historial']]} />
       {tab === 'table' && <Standings comp={comp} nav={nav} myClub={myClub} adv={false} />}
       {tab === 'teams' && <Standings comp={comp} nav={nav} myClub={myClub} adv />}
@@ -742,7 +839,8 @@ function Standings({ comp, nav, myClub, adv }: { comp: number; nav: Nav; myClub:
 }
 
 function Leaders({ comp, nav, myClub }: { comp: number; nav: Nav; myClub: number }) {
-  const [stage, setStage] = useState<'regular' | 'playoffs'>('regular');
+  const [stage0, setStage] = useState<'regular' | 'playoffs'>('regular');
+  const stage: Q.Stage = comp >= 3 ? 'all' : stage0;
   const [cat, setCat] = useState('pts');
   const { data, error } = useData<Q.PlayerLine[]>('leaders', { comp, stage }, [comp, stage]);
   if (!data) return <Loading error={error} />;
@@ -758,7 +856,7 @@ function Leaders({ comp, nav, myClub }: { comp: number; nav: Nav; myClub: number
         <select value={cat} onChange={(e) => setCat(e.target.value)} aria-label="Categoría">
           {LEADER_CATS.map((x) => (<option key={x.key} value={x.key}>{x.label}</option>))}
         </select>
-        {comp === 1 && <Tabs<'regular' | 'playoffs'> small value={stage} onChange={setStage} options={[['regular', 'Regular'], ['playoffs', 'Playoffs']]} />}
+        {comp === 1 && <Tabs<'regular' | 'playoffs'> small value={stage0} onChange={setStage} options={[['regular', 'Regular'], ['playoffs', 'Playoffs']]} />}
       </div>
       <ol className="leaders">
         {rows.map((l) => (
@@ -801,6 +899,86 @@ function Playoffs({ comp, nav }: { comp: number; nav: Nav }) {
   );
 }
 
+type CompView = ReturnType<typeof Q.competitionView>;
+const ROUND_NAME: Record<number, string> = { 1: 'Cuartos', 2: 'Semifinales', 3: 'Final' };
+
+/** Copa del Rey y competiciones europeas: grupos, cuadro y líderes. */
+function CupView({ comp, nav, myClub }: { comp: number; nav: Nav; myClub: number }) {
+  const [tab, setTab] = useState<'groups' | 'po' | 'leaders'>(comp === 3 ? 'po' : 'groups');
+  const { data, error } = useData<CompView>('competition', { comp }, [comp]);
+  useEffect(() => setTab(comp === 3 ? 'po' : 'groups'), [comp]);
+  if (!data) return <Loading error={error} />;
+  const opts: ['groups' | 'po' | 'leaders', string][] = comp === 3 ? [['po', 'Cuadro'], ['leaders', 'Líderes']] : [['groups', 'Grupos'], ['po', 'Eliminatorias'], ['leaders', 'Líderes']];
+  return (
+    <div>
+      <section className="hero">
+        <h2><span className={`compbadge c${comp}`}>{data.info.short}</span>{data.info.name}</h2>
+        <p className="muted small">
+          {comp === 3
+            ? 'Los 8 primeros de la ACB al acabar la primera vuelta (jornada 17). Cuartos, semifinales y final a partido único (días 18-20), en casa del mejor clasificado.'
+            : 'Dos grupos de 8 a doble vuelta (días pares 2-28). Los 4 primeros de cada grupo pasan a cuartos; cuartos, semifinales y final a partido único.'}
+        </p>
+        {data.champion?.champion && <p>Campeón: <b>{data.champion.champion}</b>{data.champion.runner ? ` · finalista: ${data.champion.runner}` : ''}</p>}
+      </section>
+      <Tabs small value={tab} onChange={setTab} options={opts} />
+      {tab === 'groups' && (
+        Object.keys(data.groups).length === 0
+          ? <p className="muted">Esta temporada no hay fase de grupos todavía.</p>
+          : Object.entries(data.groups).map(([g, rows]) => (
+              <section key={g}>
+                <h3>Grupo {g}</h3>
+                <Table
+                  cols={[
+                    { key: 'pos', label: '#', left: true, value: (r) => rows.indexOf(r) + 1, render: (r) => { const i = rows.indexOf(r) + 1; return <span className={i <= 4 ? 'po' : ''}>{i}</span>; } },
+                    { key: 'club', label: 'Club', left: true, value: (r) => r.name },
+                    { key: 'gp', label: 'PJ', value: (r) => r.gp },
+                    { key: 'w', label: 'G', value: (r) => r.w },
+                    { key: 'l', label: 'P', value: (r) => r.l },
+                    { key: 'd', label: 'Dif.', value: (r) => r.pf - r.pa, render: (r) => signed(r.pf - r.pa) },
+                  ]}
+                  rows={rows}
+                  rowKey={(r) => r.club_id}
+                  highlight={(r) => r.club_id === myClub}
+                  onRow={(r) => nav.club(r.club_id)}
+                />
+              </section>
+            ))
+      )}
+      {tab === 'po' && <Bracket data={data} nav={nav} myClub={myClub} />}
+      {tab === 'leaders' && <Leaders comp={comp} nav={nav} myClub={myClub} />}
+    </div>
+  );
+}
+
+function Bracket({ data, nav, myClub }: { data: CompView; nav: Nav; myClub: number }) {
+  if (!data.series.length) return <p className="muted">{data.comp === 3 ? 'El cuadro se sortea al terminar la jornada 17 de la ACB.' : 'Los cruces se conocen al terminar la fase de grupos.'}</p>;
+  return (
+    <section>
+      <div className="bracket">
+        {[1, 2, 3].map((r) => (
+          <div key={r} className="col">
+            <h4>{ROUND_NAME[r]}</h4>
+            {data.series.filter((s) => s.round === r).map((s) => {
+              const g = s.games[0];
+              const hiHome = !g || g.home_id === s.high_id;
+              const hiPts = g?.status === 'jugado' ? (hiHome ? g.home_pts : g.away_pts) : null;
+              const loPts = g?.status === 'jugado' ? (hiHome ? g.away_pts : g.home_pts) : null;
+              return (
+                <div key={s.id} className={`tie ${s.high_id === myClub || s.low_id === myClub ? 'me' : ''}`} onClick={() => g && g.status === 'jugado' && nav.game(g.id)}>
+                  <div className={s.winner_id === s.high_id ? 'w' : ''}><span>{s.high}</span><span>{hiPts ?? ''}</span></div>
+                  <div className={s.winner_id === s.low_id ? 'w' : ''}><span>{s.low}</span><span>{loPts ?? ''}</span></div>
+                  {!g || g.status !== 'jugado' ? <div className="muted small">Día {g?.day ?? '—'}</div> : null}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+      <p className="muted small">Toca un cruce jugado para ver la hoja del partido.</p>
+    </section>
+  );
+}
+
 function History() {
   const { data, error } = useData<ReturnType<typeof Q.history>>('history', null, []);
   if (!data) return <Loading error={error} />;
@@ -818,6 +996,237 @@ function History() {
         rows={data}
         rowKey={(r) => `${r.season}-${r.competition}`}
       />
+    </section>
+  );
+}
+
+/* ───────────────────────────── Glosario, tendencias, quinteto ───────────────────────────── */
+
+function Glossary() {
+  return (
+    <details className="gloss">
+      <summary>¿Qué significa cada columna?</summary>
+      <dl>
+        <dt>USG%</dt><dd>Porcentaje de las jugadas del equipo que acaba él (tiro, tiros libres o pérdida) mientras está en pista.</dd>
+        <dt>AST% / REB%</dt><dd>Porcentaje de canastas de sus compañeros que asiste / de rebotes disponibles que coge mientras juega.</dd>
+        <dt>PÉR%</dt><dd>Pérdidas por cada 100 jugadas que acaba.</dd>
+        <dt>WS (Win Shares)</dt><dd>Victorias del equipo que se le atribuyen por lo que aporta en ataque (OWS) y en defensa (DWS). La suma de un equipo se acerca a sus victorias.</dd>
+        <dt>VA (victorias añadidas)</dt><dd>Victorias que aporta por encima de un suplente de nivel mínimo en sus mismos minutos. 0 = un jugador cualquiera habría hecho lo mismo.</dd>
+        <dt>WS/40</dt><dd>Win Shares por cada 40 minutos jugados; 0,10 es aproximadamente la media.</dd>
+      </dl>
+    </details>
+  );
+}
+
+const KIND_LABEL: Record<string, string> = { rim: 'Cerca del aro', paint: 'Pintura', mid: 'Media distancia', three: 'Triples' };
+function Tendencies({ natural, real, shots }: { natural: Record<string, number>; real: Record<string, number> | null; shots: number }) {
+  return (
+    <div>
+      {(['rim', 'paint', 'mid', 'three'] as const).map((k) => (
+        <div key={k} className="attr tend">
+          <span className="an">{KIND_LABEL[k]}</span>
+          <span className="ab dual">
+            <span className="a3" style={{ width: `${Math.round(natural[k]! * 100)}%` }} />
+            {real && <span className="real" style={{ width: `${Math.round(real[k]! * 100)}%` }} />}
+          </span>
+          <span className="av">{Math.round(natural[k]! * 100)}%{real ? <small className="muted"> / {Math.round(real[k]! * 100)}%</small> : null}</span>
+        </div>
+      ))}
+      <p className="muted small">Barra verde: lo que tiende a buscar por sus atributos. Barra fina: lo que ha tirado de verdad esta temporada{shots ? ` (${shots} tiros)` : ''}, que también depende del plan de tiro de su entrenador.</p>
+    </div>
+  );
+}
+
+type LineupRow = ReturnType<typeof Q.lineup>[number];
+const SLOT_LABEL = ['Base (PG)', 'Escolta (SG)', 'Alero (SF)', 'Ala-pívot (PF)', 'Pívot (C)'];
+const LEVELS: [Level, string][] = [['menos', 'Menos'], ['normal', 'Normal'], ['mas', 'Más']];
+
+function LineupEditor({ clubId, nav }: { clubId: number; nav: Nav }) {
+  const { data, error } = useData<LineupRow[]>('lineup', { clubId }, [clubId]);
+  const tac = useData<Tactics>('tactics', { clubId }, [clubId]);
+  const [starters, setStarters] = useState<(number | null)[]>([null, null, null, null, null]);
+  const [roles, setRoles] = useState<Record<number, Role>>({});
+  const [shoot, setShoot] = useState<Record<number, Level>>({});
+  const [plan, setPlan] = useState<Tactics['shot']>({ rim: 'normal', paint: 'normal', mid: 'normal', three: 'normal' });
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    if (!data) return;
+    const st: (number | null)[] = [null, null, null, null, null];
+    for (const p of data) if (p.slot !== null) st[p.slot] = p.id;
+    setStarters(st);
+    setRoles(Object.fromEntries(data.map((p) => [p.id, p.role as Role])));
+    setShoot(Object.fromEntries(data.map((p) => [p.id, p.shoot as Level])));
+  }, [data]);
+  useEffect(() => {
+    if (tac.data) setPlan(tac.data.shot);
+  }, [tac.data]);
+  if (!data) return <Loading error={error} />;
+  const byId = new Map(data.map((p) => [p.id, p]));
+  const save = async (st = starters, ro = roles, sh = shoot, pl = plan) => {
+    setErr(null);
+    try {
+      await call('setLineup', { clubId, starters: st, roles: ro, shoot: sh, tactics: { shot: pl } });
+      setMsg('Guardado. Se aplica desde el próximo partido.');
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  };
+  const bench = data.filter((p) => !starters.includes(p.id));
+  return (
+    <div>
+      {msg && <p className="ok">{msg}</p>}
+      {err && <p className="error">{err}</p>}
+      <section>
+        <h3>Quinteto titular</h3>
+        <div className="oncourt">
+          {starters.map((id, slot) => {
+            const p = id !== null ? byId.get(id) : undefined;
+            return (
+              <div key={slot} className="pc" onClick={() => p && nav.player(p.id)}>
+                {p && p.origin !== 'real' ? <Face id={p.id} nationality={p.nationality} age={p.age} colors={p.colors} size={38} /> : <span className="face" style={{ width: 38, height: 57, display: 'grid', placeItems: 'center', margin: '0 auto', color: 'var(--muted)' }}>{p?.number ?? '?'}</span>}
+                <div className="n">{p ? p.name.split(' ').slice(-1)[0] : 'Auto'}</div>
+                <div className="muted">{['PG', 'SG', 'SF', 'PF', 'C'][slot]}{p ? ` · ${p.atPos[slot]}` : ''}</div>
+              </div>
+            );
+          })}
+        </div>
+        {starters.map((id, slot) => (
+          <div key={slot} className="slot">
+            <span className="sl">{SLOT_LABEL[slot]}</span>
+            <select
+              value={id ?? ''}
+              onChange={(e) => {
+                const v = e.target.value ? Number(e.target.value) : null;
+                const next = starters.map((x, i) => (i === slot ? v : x === v ? null : x));
+                setStarters(next);
+                setMsg(null);
+              }}
+            >
+              <option value="">Automático</option>
+              {[...data].sort((a, b) => b.atPos[slot]! - a.atPos[slot]!).map((p) => (
+                <option key={p.id} value={p.id}>{p.name} · {p.pos1}{p.pos2 ? `/${p.pos2}` : ''} · {p.atPos[slot]}</option>
+              ))}
+            </select>
+          </div>
+        ))}
+        <p className="muted small">El número es su media jugando en ese puesto. «Automático» deja que el entrenador elija. Con cansancio o faltas, el titular también se sienta.</p>
+      </section>
+
+      <section>
+        <h3>Rotación y libertad de tiro</h3>
+        <div className="tbl">
+          <table>
+            <thead><tr><th className="l">Jugador</th><th className="l">Minutos</th><th className="l">Tiro</th><th>Pos.</th><th>Media</th><th>MIN</th></tr></thead>
+            <tbody>
+              {[...starters.filter((x): x is number => x !== null).map((id) => byId.get(id)!), ...bench].map((p) => {
+                const isStarter = starters.includes(p.id);
+                return (
+                  <tr key={p.id}>
+                    <td className="l tap" onClick={() => nav.player(p.id)}>{isStarter ? <b>{p.name}</b> : p.name}</td>
+                    <td className="l">
+                      {isStarter ? <span className="muted">Titular</span> : (
+                        <select value={roles[p.id] ?? 'rot'} onChange={(e) => { setRoles({ ...roles, [p.id]: e.target.value as Role }); setMsg(null); }}>
+                          <option value="rot">Rotación</option>
+                          <option value="poco">Pocos min.</option>
+                          <option value="fuera">Fuera</option>
+                        </select>
+                      )}
+                    </td>
+                    <td className="l">
+                      <select value={shoot[p.id] ?? 'normal'} onChange={(e) => { setShoot({ ...shoot, [p.id]: e.target.value as Level }); setMsg(null); }}>
+                        <option value="menos">Menos</option>
+                        <option value="normal">Normal</option>
+                        <option value="mas">Más</option>
+                      </select>
+                    </td>
+                    <td>{p.pos1}{p.pos2 ? `/${p.pos2}` : ''}</td>
+                    <td>{p.ovr}</td>
+                    <td>{p.min !== null ? f1(p.min) : '—'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <p className="muted small">Minutos: titular, rotación, pocos minutos o fuera de la rotación. Tiro: «Más» le da más balón, pero sus tiros serán algo peores; «Menos», al revés. MIN: minutos por partido esta temporada.</p>
+      </section>
+
+      <section>
+        <h3>Plan de tiro del equipo</h3>
+        {(['three', 'mid', 'paint', 'rim'] as const).map((k) => (
+          <div key={k} className="slot">
+            <span className="sl">{KIND_LABEL[k]}</span>
+            <Tabs<Level> small value={plan[k]} onChange={(v) => { setPlan({ ...plan, [k]: v }); setMsg(null); }} options={LEVELS} />
+          </div>
+        ))}
+        <p className="muted small">Buscar más un tipo de tiro aumenta su volumen y baja algo su acierto (son tiros más forzados); buscar menos, lo contrario. Lo notarás en el mapa de tiro y en los porcentajes.</p>
+      </section>
+
+      <div className="row">
+        <button onClick={() => void save()}>Guardar</button>
+        <button className="sec" onClick={() => {
+          const st = [null, null, null, null, null];
+          const ro = {};
+          const sh = {};
+          const pl = { rim: 'normal', paint: 'normal', mid: 'normal', three: 'normal' } as Tactics['shot'];
+          setStarters(st); setRoles(ro); setShoot(sh); setPlan(pl);
+          void save(st, ro, sh, pl);
+        }}>Todo automático</button>
+      </div>
+    </div>
+  );
+}
+
+function RealData({ id }: { id: number }) {
+  const { data, error } = useData<{
+    seasons: { season: number; gp: number; min: number; val: number; sm: number | null; wins: number }[];
+    prediction: { season: number; day: number; prediction: number | null; horizon: number | null; price: number | null; broker: number | null; avg: number | null } | null;
+    last: { season: number; day: number; team: string; opponent: string; home: number; win: number; min: number; val: number; sm_pts: number | null }[];
+    batch: { file_name: string; imported_at: string } | null;
+  }>('real', { id }, [id]);
+  if (!data) return <Loading error={error} />;
+  return (
+    <section>
+      <h3>Liga ACB real <Tag kind="real" /></h3>
+      <Table
+        cols={[
+          { key: 's', label: 'Temp.', left: true, value: (r) => r.season, render: (r) => seasonLabel(r.season) },
+          { key: 'gp', label: 'PJ', value: (r) => r.gp },
+          { key: 'min', label: 'MIN', value: (r) => (r.gp ? r.min / r.gp : null), render: (r) => (r.gp ? f1(r.min / r.gp) : '—') },
+          { key: 'val', label: 'VAL', value: (r) => (r.gp ? r.val / r.gp : null), render: (r) => (r.gp ? f1(r.val / r.gp) : '—') },
+          { key: 'v40', label: 'VAL/40', value: (r) => (r.min ? (40 * r.val) / r.min : null), render: (r) => (r.min ? f1((40 * r.val) / r.min) : '—') },
+          { key: 'sm', label: 'Pts SM', title: 'Puntos SuperManager por partido', value: (r) => r.sm, render: (r) => f1(r.sm) },
+        ]}
+        rows={data.seasons}
+        rowKey={(r) => r.season}
+      />
+      {data.prediction && (
+        <>
+          <h3>Predicción de SuperManagerLab <span className="tag est">Predicción</span></h3>
+          <dl>
+            <dt>Jornada {data.prediction.day}</dt><dd>{f1(data.prediction.prediction)} puntos SM previstos{data.prediction.horizon !== null ? ` · ${f1(data.prediction.horizon)} a varias jornadas` : ''}</dd>
+            <dt>Precio</dt><dd>{data.prediction.price !== null ? `${f0(data.prediction.price)} €` : '—'}{data.prediction.broker !== null ? ` · bróker esperado ${data.prediction.broker >= 0 ? '+' : ''}${f0(data.prediction.broker)} €` : ''}</dd>
+          </dl>
+        </>
+      )}
+      <h3>Últimos partidos reales</h3>
+      <Table
+        cols={[
+          { key: 'd', label: 'Jor.', left: true, value: (r) => r.season * 100 + r.day, render: (r) => `${seasonLabel(r.season)} J${r.day}` },
+          { key: 'o', label: 'Rival', left: true, value: (r) => r.opponent, render: (r) => `${r.home ? 'vs' : 'en'} ${r.opponent}` },
+          { key: 'w', label: '', value: (r) => r.win, render: (r) => <b className={r.win ? 'good' : 'bad'}>{r.win ? 'G' : 'P'}</b> },
+          { key: 'min', label: 'MIN', value: (r) => r.min, render: (r) => f1(r.min) },
+          { key: 'val', label: 'VAL', value: (r) => r.val },
+          { key: 'sm', label: 'SM', value: (r) => r.sm_pts, render: (r) => f1(r.sm_pts) },
+        ]}
+        rows={data.last}
+        rowKey={(r) => `${r.season}-${r.day}-${r.team}`}
+      />
+      <p className="muted small">
+        Datos importados de SuperManagerLab{data.batch ? ` (${data.batch.file_name}, ${new Date(data.batch.imported_at).toLocaleDateString('es-ES')})` : ''}. Solo traen minutos y valoración; por eso los atributos son estimados.
+        Estas cifras nunca se mezclan con las estadísticas que genera el juego.
+      </p>
     </section>
   );
 }

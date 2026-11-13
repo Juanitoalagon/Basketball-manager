@@ -4,6 +4,7 @@ import { wrapDb } from '../src/db/adapter';
 import { migrate, type Db } from '../src/core/schema';
 import { COMP, REGULAR_DAYS, advanceDay, chooseClub, createUniverse, getUniverse, roundRobin, startNewSeason, standings } from '../src/core/season';
 import { Rng } from '../src/core/rng';
+import { CUPO_RULES, cupoOf } from '../src/core/names';
 import { gameDetail, home, leagueTable, playerDetail, playerLines, playoffs, shotZones, squad, teamTotals } from '../src/core/queries';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -35,9 +36,19 @@ describe('calendario', () => {
 describe('temporada completa', () => {
   it('crea el universo, simula liga y playoffs, y empieza la siguiente', () => {
     createUniverse(db, { name: 'Prueba', seed: 2024, id: 'u-1' });
-    expect(one('SELECT COUNT(*) FROM club')).toBe(36);
-    expect(one('SELECT COUNT(*) FROM player')).toBe(36 * 12);
-    expect(one('SELECT COUNT(*) FROM game')).toBe(2 * 18 * 17);
+    expect(one("SELECT COUNT(*) FROM club WHERE country = 'ES'")).toBe(36);
+    expect(one('SELECT COUNT(*) FROM club')).toBe(72);
+    expect(one('SELECT COUNT(*) FROM player WHERE club_id IS NOT NULL')).toBe(72 * 12);
+    expect(one('SELECT COUNT(*) FROM contract')).toBe(72 * 12);
+    expect(one('SELECT COUNT(*) FROM game WHERE competition_id <= 2')).toBe(2 * 18 * 17);
+    // Europa: 3 competiciones × 2 grupos de 8 × doble vuelta.
+    expect(one('SELECT COUNT(*) FROM game WHERE competition_id >= 4')).toBe(3 * 2 * 8 * 7);
+    // Cupos: todos los clubes españoles cumplen.
+    for (const c of db.rows<{ id: number }>("SELECT id FROM club WHERE country = 'ES'")) {
+      const nat = db.rows<{ nationality: string }>('SELECT nationality FROM player WHERE club_id = ?', [c.id]).map((x) => cupoOf(x.nationality));
+      expect(nat.filter((x) => x === 'NAC').length).toBeGreaterThanOrEqual(CUPO_RULES.minNac);
+      expect(nat.filter((x) => x === 'EXT').length).toBeLessThanOrEqual(CUPO_RULES.maxExt);
+    }
     expect(() => advanceDay(db)).toThrow(/elige tu club/);
     chooseClub(db, 7);
     let reports = 0;
@@ -52,7 +63,11 @@ describe('temporada completa', () => {
     const u = getUniverse(db)!;
     expect(u.phase).toBe('fin');
     expect(one("SELECT COUNT(*) FROM game WHERE status <> 'jugado'")).toBe(0);
-    expect(one('SELECT COUNT(*) FROM season_result WHERE champion_id IS NOT NULL')).toBe(2);
+    // ACB, Primera FEB, Copa, EuroLeague, EuroCup y BCL con campeón.
+    expect(one('SELECT COUNT(*) FROM season_result WHERE champion_id IS NOT NULL')).toBe(6);
+    // Copa: 4 + 2 + 1 eliminatorias a partido único, ocho equipos ACB.
+    expect(one('SELECT COUNT(*) FROM game WHERE competition_id = 3')).toBe(7);
+    for (const comp of [4, 5, 6]) expect(one("SELECT COUNT(*) FROM playoff_series WHERE season = 2026 AND competition_id = ? AND winner_id IS NOT NULL", [comp])).toBe(7);
     const series = playoffs(db, 2026, COMP.ACB);
     expect(series.length).toBe(7);
     expect(series.every((s) => s.winner_id)).toBe(true);
@@ -92,8 +107,11 @@ describe('temporada completa', () => {
     expect(ns.season).toBe(2027);
     expect(getUniverse(db)!.phase).toBe('regular');
     expect(one('SELECT COUNT(*) FROM club WHERE competition_id = 1')).toBe(18);
-    expect(one("SELECT COUNT(*) FROM game WHERE season = 2027 AND status = 'pendiente'")).toBe(2 * 18 * 17);
-    const sizes = db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE retired = 0 GROUP BY club_id');
+    expect(one("SELECT COUNT(*) FROM game WHERE season = 2027 AND status = 'pendiente' AND competition_id <= 2")).toBe(2 * 18 * 17);
+    expect(one("SELECT COUNT(*) FROM game WHERE season = 2027 AND competition_id >= 4")).toBe(3 * 2 * 8 * 7);
+    // Cantera: cada club español tiene canteranos sin ficha profesional.
+    expect(one("SELECT COUNT(DISTINCT youth) FROM player WHERE youth > 0 AND club_id IS NULL AND retired = 0")).toBe(36);
+    const sizes = db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE retired = 0 AND club_id IS NOT NULL GROUP BY club_id');
     expect(sizes.every((s) => s.n >= 12)).toBe(true);
     expect(one('SELECT COUNT(*) FROM player_attributes WHERE season = 2027')).toBe(one('SELECT COUNT(*) FROM player WHERE retired = 0'));
     advanceDay(db);

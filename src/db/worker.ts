@@ -5,9 +5,16 @@
  */
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import { buildSave, readSave, type Manifest } from '../core/savefile';
-import { APP_VERSION, ENGINE_VERSION, TABLES, getSetting, migrate, schemaVersion, setSetting, type Db } from '../core/schema';
-import { COMP, advanceDay, chooseClub, createUniverse, getUniverse, startNewSeason, type DayReport } from '../core/season';
+import { APP_VERSION, ENGINE_VERSION, TABLES, getSetting, migrate, schemaVersion, setSetting, transaction, type Db } from '../core/schema';
+import { ensureEconomy } from '../core/market';
+import { setupWorld } from '../core/world';
+import * as M from '../core/market';
+import { COMP, advanceDay, chooseClub, createUniverse, getUniverse, prepareLive, setLineup, startNewSeason, standings, type DayReport } from '../core/season';
+import { simulateGame, type Intervention } from '../core/engine';
+import type { Level, Role, Tactics } from '../core/engine';
 import * as Q from '../core/queries';
+import * as W from '../core/world';
+import { createRealUniverse, readSuperManagerZip, realSummary, type RealData } from '../core/importer';
 import { wrapDb } from './adapter';
 import type { AdvanceResult, ImportReport, LoadResult, Status } from './protocol';
 
@@ -27,6 +34,8 @@ let db: Db;
 let openMs = 0;
 let cancelRequested = false;
 let pendingImport: Manifest | null = null;
+let pendingReal: RealData | null = null;
+let live: ReturnType<typeof prepareLive> = null;
 
 function openMain() {
   raw = new pool.OpfsSAHPoolDb(MAIN);
@@ -39,6 +48,12 @@ function openMain() {
   db.exec('PRAGMA synchronous = ' + SYNC);
   db.exec('PRAGMA foreign_keys = ON');
   migrate(db);
+  // Partidas de versiones anteriores: crear contratos y presupuestos que no existían.
+  // Partidas de versiones anteriores: añade clubes europeos, colores, cantera y contratos que falten.
+  transaction(db, () => {
+    setupWorld(db);
+    ensureEconomy(db);
+  });
 }
 
 async function init(opts?: { j?: string; s?: string; p?: string }): Promise<Status> {
@@ -193,7 +208,15 @@ async function advance(mode: 'day' | 'week' | 'regular' | 'season'): Promise<Adv
   for (let i = 0; i < max && !cancelRequested; i++) {
     const r = advanceDay(db);
     reports.push(r);
-    postMessage({ event: 'progress', progress: { done: i + 1, total: max === 200 ? 0 : max, season: r.season, day: r.day, lastMs: 0 } });
+    const u0 = getUniverse(db)!;
+    let record: string | undefined;
+    if (u0.user_club_id) {
+      const comp = Q.compOfClub(db, u0.user_club_id);
+      const me = standings(db, u0.game_season, comp).find((x) => x.club_id === u0.user_club_id);
+      if (me) record = `${me.w}-${me.l}`;
+    }
+    const last = r.userGame ? `${r.userGame.home} ${r.userGame.homePts}-${r.userGame.awayPts} ${r.userGame.away}` : undefined;
+    postMessage({ event: 'progress', progress: { done: i + 1, total: max === 200 ? 0 : max, season: r.season, day: r.day, lastMs: 0, record, last, stage: r.stage } });
     if (r.seasonOver) break;
     const u = getUniverse(db)!;
     if (mode === 'regular' && (u.phase !== startPhase || r.stage !== 'regular')) break;
@@ -288,12 +311,77 @@ const ops: Record<string, (a: any) => unknown> = {
     return status();
   },
   loadTest: ({ seasons }: { seasons: number }) => loadTest(seasons),
+  previewReal: async ({ bytes }: { bytes: Uint8Array }) => {
+    pendingReal = await readSuperManagerZip(bytes);
+    const d = pendingReal;
+    return {
+      teams: d.teams.map((t) => ({ name: t.name, code: t.code, players: t.players.length })),
+      players: d.teams.reduce((a, t) => a + t.players.length, 0),
+      unmatched: d.unmatched,
+      prevMatched: d.prevMatched,
+      currentDays: d.currentDays,
+      files: d.files,
+    };
+  },
+  createReal: async ({ name, seed, fileName }: { name: string; seed: number; fileName: string }) => {
+    if (!pendingReal) throw new Error('Primero elige el zip de datos.');
+    await snapshot('antes-de-nueva-partida');
+    createRealUniverse(db, pendingReal, { name, seed, id: crypto.randomUUID(), fileName });
+    pendingReal = null;
+    return status();
+  },
+  real: ({ id }: { id: number }) => realSummary(db, id),
+  liveStart: ({ gameId }: { gameId?: number } = {}) => {
+    live = prepareLive(db, gameId);
+    if (!live) return null;
+    const { game, userSide, people, clubs, home, away, options } = live;
+    const season = getUniverse(db)!.game_season;
+    return { game, userSide, people, clubs, options, season, roster: [home.players.map((p) => p.id), away.players.map((p) => p.id)] };
+  },
+  liveSim: ({ interventions }: { interventions: Intervention[] }) => {
+    if (!live) throw new Error('No hay partido en directo preparado.');
+    const r = simulateGame(live.home, live.away, live.seed, { pbp: true, timeline: true, interventions });
+    return { score: r.score, ot: r.ot, pbp: r.pbp, timeline: r.timeline };
+  },
+  liveFinish: ({ interventions }: { interventions: Intervention[] }) => {
+    if (!live) throw new Error('No hay partido en directo preparado.');
+    const gameId = live.game.id;
+    const report = advanceDay(db, { interventions, liveGameId: gameId });
+    live = null;
+    return { report, gameId };
+  },
+  allPlayers: () => Q.allPlayers(db),
+  office: ({ clubId }: { clubId: number }) => Q.office(db, clubId),
+  setTraining: ({ clubId, training }: { clubId: number; training: W.Training }) => {
+    W.setTraining(db, clubId, training);
+    return Q.office(db, clubId);
+  },
+  upgrade: ({ clubId, what }: { clubId: number; what: 'facilities' | 'scouting' }) => W.upgradeClub(db, clubId, what),
+  promoteYouth: ({ clubId, id }: { clubId: number; id: number }) => W.promoteYouth(db, id, clubId),
+  releaseYouth: ({ clubId, id }: { clubId: number; id: number }) => W.releaseYouth(db, id, clubId),
+  competition: ({ comp }: { comp: number }) => Q.competitionView(db, getUniverse(db)!.game_season, comp),
+  clubComps: ({ clubId }: { clubId: number }) => Q.clubCompetitions(db, clubId, getUniverse(db)!.game_season),
+  news: ({ clubId, limit }: { clubId: number | null; limit?: number }) => Q.news(db, clubId, limit),
+  market: ({ id }: { id: number }) => M.marketInfo(db, id),
+  offers: ({ id }: { id: number }) => M.offersFor(db, id),
+  finances: ({ clubId }: { clubId: number }) => M.finances(db, clubId),
+  sign: ({ clubId, id, salary, years }: { clubId: number; id: number; salary: number; years: number }) => M.signFreeAgent(db, clubId, id, salary, years),
+  buy: ({ clubId, id, fee, salary, years }: { clubId: number; id: number; fee: number; salary: number; years: number }) => M.buyPlayer(db, clubId, id, fee, salary, years),
+  sell: ({ id, toClub }: { id: number; toClub: number }) => M.sellPlayer(db, id, toClub),
+  release: ({ id }: { id: number }) => M.releasePlayer(db, id),
+  renew: ({ id, salary, years }: { id: number; salary: number; years: number }) => M.renewPlayer(db, id, salary, years),
   clubs: () => Q.listClubs(db),
   chooseClub: ({ clubId }: { clubId: number }) => {
     chooseClub(db, clubId);
     return status();
   },
   home: () => Q.home(db),
+  lineup: ({ clubId }: { clubId: number }) => Q.lineup(db, clubId),
+  tactics: ({ clubId }: { clubId: number }) => Q.tactics(db, clubId),
+  setLineup: ({ clubId, starters, roles, shoot, tactics }: { clubId: number; starters: (number | null)[]; roles: Record<number, Role>; shoot: Record<number, Level>; tactics: Tactics }) => {
+    setLineup(db, clubId, starters, roles, shoot, tactics);
+    return Q.lineup(db, clubId);
+  },
   advance: ({ mode }: { mode: 'day' | 'week' | 'regular' | 'season' }) => advance(mode),
   newSeason: async () => {
     await snapshot('antes-de-nueva-temporada');

@@ -1,4 +1,3 @@
-declare const process: { env: Record<string, string | undefined> };
 import { it } from 'vitest';
 import { TARGETS, runBench } from './calib';
 import { TUNE } from '../src/core/engine';

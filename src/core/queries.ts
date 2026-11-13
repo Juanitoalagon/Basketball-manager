@@ -1,12 +1,16 @@
 /** Consultas de lectura para las pantallas. Devuelven objetos simples listos para pintar. */
 import { inflateSync, strFromU8 } from 'fflate';
 import { ATTR_KEYS, type Attrs, overallAt, type Pos, POSITIONS } from './attributes';
-import { BOX_FIELDS } from './engine';
+import { BOX_FIELDS, DEFAULT_TACTICS, type Tactics, shotTendencies } from './engine';
 import { COMP, type StandingRow, getUniverse, standings } from './season';
 import { type Db } from './schema';
-import { type League, type Line, type TeamTotals, astPct, drtg, efg, fourFactors, ortg, pace, pir, rebPct, tovPct, ts, usg, winShares } from './stats';
+import { askSalary, marketValue } from './market';
+import { COMP_INFO } from './names';
+import { cupoCounts, getTraining, groupStandings, scoutNoise, upgradeCost } from './world';
+import { type League, type Line, type TeamTotals, winsAdded, astPct, drtg, efg, fourFactors, ortg, pace, pir, rebPct, tovPct, ts, usg, winShares } from './stats';
 
-export type Stage = 'regular' | 'playoffs';
+/** Fase de una competición; 'all' suma todas (útil en Copa y Europa). */
+export type Stage = 'regular' | 'playoffs' | 'copa' | 'grupos' | 'eliminatoria' | 'all';
 const SUMS = BOX_FIELDS.map((f) => `SUM(${f}) AS ${f}`).join(', ');
 const toLine = (r: Record<string, unknown>): Line => {
   const o: Record<string, number> = {};
@@ -17,7 +21,10 @@ const toLine = (r: Record<string, unknown>): Line => {
 };
 
 export function compOfClub(db: Db, clubId: number): number {
-  return db.rows<{ c: number }>('SELECT competition_id AS c FROM club WHERE id = ?', [clubId])[0]?.c ?? COMP.ACB;
+  const c = db.rows<{ c: number | null }>('SELECT competition_id AS c FROM club WHERE id = ?', [clubId])[0]?.c;
+  if (c) return c;
+  // Clubes extranjeros: su competición europea.
+  return db.rows<{ c: number }>('SELECT competition_id AS c FROM comp_group WHERE club_id = ? ORDER BY season DESC LIMIT 1', [clubId])[0]?.c ?? COMP.ACB;
 }
 
 /** Totales por equipo (y de su rival) y de la liga, para una temporada, competición y fase. */
@@ -26,9 +33,9 @@ export function teamTotals(db: Db, season: number, comp: number, stage: Stage): 
     `SELECT t.club_id, COUNT(*) AS gp, SUM(t.poss) AS poss, ${BOX_FIELDS.map((f) => `SUM(t.${f}) AS ${f}`).join(', ')},
        SUM(o.poss) AS o_poss, ${BOX_FIELDS.map((f) => `SUM(o.${f}) AS o_${f}`).join(', ')}
      FROM game g JOIN game_team_box t ON t.game_id = g.id JOIN game_team_box o ON o.game_id = g.id AND o.club_id <> t.club_id
-     WHERE g.season = ? AND g.competition_id = ? AND g.stage = ? AND g.status = 'jugado'
+     WHERE g.season = ? AND g.competition_id = ? AND (? = 'all' OR g.stage = ?) AND g.status = 'jugado'
      GROUP BY t.club_id`,
-    [season, comp, stage],
+    [season, comp, stage, stage],
   );
   const teams = new Map<number, TeamTotals>();
   const league: League = { pts: 0, poss: 0, teamGames: 0, sec: 0 };
@@ -64,6 +71,7 @@ export interface PlayerLine extends Line {
   dws: number;
   ws: number;
   ws40: number;
+  va: number;
 }
 
 /** Líneas de temporada de todos los jugadores de una competición, con estadísticas avanzadas. */
@@ -74,9 +82,9 @@ export function playerLines(db: Db, season: number, comp: number, stage: Stage, 
        SUM(s.gp) AS gp, SUM(s.gs) AS gs, ${BOX_FIELDS.map((f) => `SUM(s.${f}) AS ${f}`).join(', ')}
      FROM player_season_stats s JOIN player p ON p.id = s.player_id JOIN club c ON c.id = s.club_id
      LEFT JOIN player_attributes a ON a.player_id = s.player_id AND a.season = s.season
-     WHERE s.season = ? AND s.competition_id = ? AND s.stage = ? AND s.source = 'sim'
+     WHERE s.season = ? AND s.competition_id = ? AND (? = 'all' OR s.stage = ?) AND s.source = 'sim'
      GROUP BY s.player_id, s.club_id`,
-    [season, comp, stage],
+    [season, comp, stage, stage],
   );
   const byTeam = new Map<number, (Line & { id: number })[]>();
   const base = rows.map((r) => {
@@ -112,18 +120,87 @@ export function playerLines(db: Db, season: number, comp: number, stage: Stage, 
         tovPct: tovPct(l),
         ...w,
         ws40: l.sec > 0 ? (w.ws * 2400) / l.sec : 0,
+        va: t ? winsAdded(w.ws, l.sec, t.gp, t.sec) : 0,
       };
     });
 }
 
+export function tactics(db: Db, clubId: number): Tactics {
+  const r = db.rows<{ data: string }>('SELECT data FROM tactics WHERE club_id = ?', [clubId])[0];
+  return r ? (JSON.parse(r.data) as Tactics) : DEFAULT_TACTICS;
+}
+
+/** Plantilla con la media de cada jugador en cada hueco, para elegir quinteto y roles. */
+export function lineup(db: Db, clubId: number) {
+  const u = getUniverse(db)!;
+  const comp = compOfClub(db, clubId);
+  const lines = new Map(playerLines(db, u.game_season, comp, 'regular', clubId).map((l) => [l.id, l]));
+  const rows = db.rows<Record<string, unknown>>(
+    `SELECT p.id, p.name, p.number, p.pos1, p.pos2, p.height_cm, p.birth_year, p.nationality, p.origin, (SELECT colors FROM club WHERE id = p.club_id) AS colors, a.*, l.slot, l.role, l.shoot
+     FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
+     LEFT JOIN lineup l ON l.player_id = p.id AND l.club_id = p.club_id
+     WHERE p.club_id = ? AND p.retired = 0 ORDER BY a.ovr DESC`,
+    [u.game_season, clubId],
+  );
+  return rows.map((r) => {
+    const attrs = Object.fromEntries(ATTR_KEYS.map((k) => [k, Number(r[k])])) as Attrs;
+    const who = { pos1: r.pos1 as Pos, pos2: (r.pos2 as Pos | null) ?? null, height_cm: Number(r.height_cm) };
+    const l = lines.get(Number(r.player_id));
+    return {
+      id: Number(r.player_id), name: String(r.name), number: r.number as number | null, pos1: who.pos1, pos2: who.pos2,
+      age: u.game_season - Number(r.birth_year), ovr: Number(r.ovr), nationality: String(r.nationality), origin: String(r.origin), colors: (r.colors as string | null) ?? null,
+      atPos: POSITIONS.map((p) => overallAt(attrs, who, p)),
+      slot: r.slot === null || r.slot === undefined ? null : Number(r.slot),
+      role: (r.role as string | null) ?? 'rot',
+      shoot: (r.shoot as string | null) ?? 'normal',
+      tend: shotTendencies(attrs, Number(r.height_cm)),
+      min: l && l.gp ? l.sec / 60 / l.gp : null,
+      gp: l?.gp ?? 0,
+    };
+  });
+}
+
+/** Todos los jugadores en activo (con club o libres), con su temporada y su situación de mercado. */
+export function allPlayers(db: Db) {
+  const u = getUniverse(db)!;
+  const lines = new Map<number, PlayerLine>();
+  for (const comp of [COMP.ACB, COMP.FEB]) {
+    for (const l of playerLines(db, u.game_season, comp, 'regular')) {
+      const prev = lines.get(l.id);
+      if (!prev || l.gp > prev.gp) lines.set(l.id, l);
+    }
+  }
+  // Jugadores de clubes extranjeros: sus números en Europa.
+  for (const comp of [4, 5, 6]) for (const l of playerLines(db, u.game_season, comp, 'all')) if (!lines.has(l.id)) lines.set(l.id, l);
+  const rows = db.rows<{ id: number; name: string; club_id: number | null; club: string | null; comp: number | null; country: string | null; pos1: string; pos2: string | null; birth_year: number; height_cm: number; nationality: string; potential_est: number; morale: number; injury_games: number; ovr: number; salary: number | null; until: number | null }>(
+    `SELECT p.id, p.name, p.club_id, c.short AS club, c.competition_id AS comp, c.country, p.pos1, p.pos2, p.birth_year, p.height_cm, p.nationality, p.potential_est, p.morale, p.injury_games,
+       a.ovr, k.salary, k.until
+     FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ? LEFT JOIN club c ON c.id = p.club_id LEFT JOIN contract k ON k.player_id = p.id
+     WHERE p.retired = 0 AND p.youth = 0`,
+    [u.game_season],
+  );
+  return rows.map((r) => {
+    const econ = { ovr: r.ovr, age: u.game_season - r.birth_year, potential_est: r.potential_est, morale: r.morale };
+    return { ...r, age: econ.age, ask: askSalary(econ), value: marketValue(econ, r.until === null ? 0 : r.until - u.game_season), line: lines.get(r.id) ?? null };
+  });
+}
+
+export function news(db: Db, clubId: number | null, limit = 15) {
+  return db.rows<{ id: number; season: number; day: number; club_id: number | null; player_id: number | null; kind: string; text: string }>(
+    'SELECT * FROM news WHERE (? IS NULL OR club_id = ? OR kind IN (\'fichaje\', \'venta\') AND club_id IS NOT NULL) ORDER BY id DESC LIMIT ?',
+    [clubId, clubId, limit],
+  );
+}
+
 export function listClubs(db: Db) {
   const season = getUniverse(db)?.game_season ?? 0;
-  return db.rows<{ id: number; name: string; short: string; city: string; competition_id: number; reputation: number; budget: number; level: number }>(
-    `SELECT c.id, c.name, c.short, c.city, c.competition_id, c.reputation, c.budget,
+  return db.rows<{ id: number; name: string; short: string; city: string; country: string; colors: string | null; competition_id: number | null; reputation: number; budget: number; level: number; euro: number | null }>(
+    `SELECT c.id, c.name, c.short, c.city, c.country, c.colors, c.competition_id, c.reputation, c.budget,
+       (SELECT competition_id FROM comp_group g WHERE g.club_id = c.id AND g.season = ?) AS euro,
        (SELECT ROUND(AVG(ovr)) FROM (SELECT a.ovr FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
           WHERE p.club_id = c.id AND p.retired = 0 ORDER BY a.ovr DESC LIMIT 8)) AS level
-     FROM club c ORDER BY c.competition_id, level DESC`,
-    [season],
+     FROM club c ORDER BY c.competition_id IS NULL, c.competition_id, level DESC`,
+    [season, season],
   );
 }
 
@@ -153,10 +230,10 @@ export function home(db: Db) {
 export interface GameListRow {
   id: number; season: number; day: number; stage: string; competition_id: number; home_id: number; away_id: number;
   home: string; away: string; home_short: string; away_short: string; home_pts: number | null; away_pts: number | null;
-  ot: number; status: string; series_id: number | null;
+  ot: number; status: string; series_id: number | null; round: number | null;
 }
 const GAME_LIST_SQL = `SELECT g.id, g.season, g.day, g.stage, g.competition_id, g.home_id, g.away_id, h.name AS home, a.name AS away,
-  h.short AS home_short, a.short AS away_short, g.home_pts, g.away_pts, g.ot, g.status, g.series_id
+  h.short AS home_short, a.short AS away_short, g.home_pts, g.away_pts, g.ot, g.status, g.series_id, g.round
   FROM game g JOIN club h ON h.id = g.home_id JOIN club a ON a.id = g.away_id`;
 
 export function clubSchedule(db: Db, clubId: number, season: number): GameListRow[] {
@@ -177,22 +254,23 @@ export function compDays(db: Db, season: number, comp: number): { day: number; s
 export function squad(db: Db, clubId: number, season: number) {
   const comp = compOfClub(db, clubId);
   const lines = new Map(playerLines(db, season, comp, 'regular', clubId).map((l) => [l.id, l]));
-  const players = db.rows<{ id: number; name: string; number: number | null; nationality: string; birth_year: number; height_cm: number; pos1: Pos; pos2: Pos | null; potential_est: number; ovr: number }>(
-    `SELECT p.id, p.name, p.number, p.nationality, p.birth_year, p.height_cm, p.pos1, p.pos2, p.potential_est, a.ovr
-     FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ? WHERE p.club_id = ? AND p.retired = 0 ORDER BY a.ovr DESC`,
+  const players = db.rows<{ id: number; name: string; number: number | null; nationality: string; birth_year: number; youth: number; origin: string; height_cm: number; pos1: Pos; pos2: Pos | null; potential_est: number; ovr: number; morale: number; injury_games: number; injury: string | null; salary: number | null; until: number | null }>(
+    `SELECT p.id, p.name, p.number, p.nationality, p.birth_year, p.youth, p.origin, p.height_cm, p.pos1, p.pos2, p.potential_est, a.ovr, p.morale, p.injury_games, p.injury, k.salary, k.until
+     FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ? LEFT JOIN contract k ON k.player_id = p.id
+     WHERE p.club_id = ? AND p.retired = 0 ORDER BY a.ovr DESC`,
     [season, clubId],
   );
-  const club = db.rows<{ id: number; name: string; short: string; comp: string; competition_id: number }>(
-    'SELECT c.id, c.name, c.short, k.name AS comp, c.competition_id FROM club c JOIN competition k ON k.id = c.competition_id WHERE c.id = ?',
-    [clubId],
+  const club = db.rows<{ id: number; name: string; short: string; comp: string; competition_id: number; country: string; colors: string | null }>(
+    'SELECT c.id, c.name, c.short, COALESCE(k.name, ?) AS comp, COALESCE(c.competition_id, ?) AS competition_id, c.country, c.colors FROM club c LEFT JOIN competition k ON k.id = c.competition_id WHERE c.id = ?',
+    [COMP_INFO[comp]?.name ?? '', comp, clubId],
   )[0]!;
-  return { club, season, players: players.map((p) => ({ ...p, age: season - p.birth_year, line: lines.get(p.id) ?? null })) };
+  return { club, season, cupo: cupoCounts(db, clubId), players: players.map((p) => ({ ...p, age: season - p.birth_year, line: lines.get(p.id) ?? null })) };
 }
 
 export function playerDetail(db: Db, id: number) {
   const u = getUniverse(db)!;
   const p = db.rows<Record<string, unknown>>(
-    `SELECT p.*, c.name AS club, c.short AS club_short, c.competition_id FROM player p LEFT JOIN club c ON c.id = p.club_id WHERE p.id = ?`,
+    `SELECT p.*, c.name AS club, c.short AS club_short, c.competition_id, c.colors AS club_colors, y.name AS youth_club FROM player p LEFT JOIN club y ON y.id = p.youth LEFT JOIN club c ON c.id = p.club_id WHERE p.id = ?`,
     [id],
   )[0];
   if (!p) throw new Error('Jugador no encontrado.');
@@ -201,7 +279,7 @@ export function playerDetail(db: Db, id: number) {
   const current = attrRows[attrRows.length - 1]!;
   const previous = attrRows.length > 1 ? attrRows[attrRows.length - 2]! : null;
   const attrs = toAttrs(current);
-  const posOvr = POSITIONS.map((pos) => ({ pos, ovr: overallAt(attrs, { pos1: p.pos1 as Pos, pos2: (p.pos2 as Pos | null) ?? null, height_cm: Number(p.height_cm) }, pos) }));
+  const posOvr = POSITIONS.map((pos) => ({ pos, ovr: Math.max(1, overallAt(attrs, { pos1: p.pos1 as Pos, pos2: (p.pos2 as Pos | null) ?? null, height_cm: Number(p.height_cm) }, pos)) }));
 
   // Temporadas: una fila por temporada, competición, fase y club.
   const seasonsRows = db.rows<{ season: number; competition_id: number; stage: Stage; club_id: number }>(
@@ -219,7 +297,13 @@ export function playerDetail(db: Db, id: number) {
      WHERE b.player_id = ? AND g.season = ? ORDER BY g.day DESC`,
     [id, u.game_season],
   ).map((r) => ({ ...r, line: { ...toLine({ ...r, gp: 1 }) } }));
+  // Tendencias: reparto natural según atributos y reparto real de sus tiros esta temporada.
+  const areaOf = (z: number) => (z === 0 ? 'rim' : z <= 3 ? 'paint' : z <= 8 ? 'mid' : 'three');
+  const real: Record<string, number> = { rim: 0, paint: 0, mid: 0, three: 0 };
+  for (const z of db.rows<{ zone: number; fga: number }>('SELECT zone, SUM(fga) AS fga FROM shot_zone_stats WHERE player_id = ? AND season = ? GROUP BY zone', [id, u.game_season])) real[areaOf(z.zone)]! += z.fga;
+  const realTotal = Object.values(real).reduce((a, b) => a + b, 0);
   return {
+    tendencies: { natural: shotTendencies(attrs, Number(p.height_cm)), real: realTotal ? Object.fromEntries(Object.entries(real).map(([k, v]) => [k, v / realTotal])) : null, shots: realTotal },
     player: p,
     season: u.game_season,
     age: u.game_season - Number(p.birth_year),
@@ -328,6 +412,60 @@ export function history(db: Db) {
      JOIN competition k ON k.id = r.competition_id LEFT JOIN club c1 ON c1.id = r.champion_id LEFT JOIN club c2 ON c2.id = r.runner_up_id
      LEFT JOIN club c3 ON c3.id = r.regular_first_id ORDER BY r.season DESC, r.competition_id`,
   );
+}
+
+/** Resumen de una competición: grupos (Europa), cruces y campeón. */
+export function competitionView(db: Db, season: number, comp: number) {
+  const groups: Record<string, StandingRow[]> = {};
+  for (const g of db.rows<{ grp: string }>('SELECT DISTINCT grp FROM comp_group WHERE season = ? AND competition_id = ? ORDER BY grp', [season, comp])) {
+    groups[g.grp] = groupStandings(db, season, comp, g.grp);
+  }
+  const champion = db.rows<{ champion: string | null; runner: string | null }>(
+    'SELECT c1.name AS champion, c2.name AS runner FROM season_result r LEFT JOIN club c1 ON c1.id = r.champion_id LEFT JOIN club c2 ON c2.id = r.runner_up_id WHERE r.season = ? AND r.competition_id = ?',
+    [season, comp],
+  )[0] ?? null;
+  const games = db.rows<{ series_id: number; id: number; home_id: number; home_pts: number | null; away_pts: number | null; status: string; day: number }>(
+    'SELECT series_id, id, home_id, home_pts, away_pts, status, day FROM game WHERE season = ? AND competition_id = ? AND series_id IS NOT NULL ORDER BY day',
+    [season, comp],
+  );
+  const series = playoffs(db, season, comp).map((s) => ({ ...s, games: games.filter((g) => g.series_id === s.id) }));
+  return { comp, info: COMP_INFO[comp]!, groups, series, champion };
+}
+
+/** Competiciones en las que juega un club esta temporada (para el selector de Liga y la portada). */
+export function clubCompetitions(db: Db, clubId: number, season: number): number[] {
+  return db.rows<{ c: number }>(
+    'SELECT DISTINCT competition_id AS c FROM game WHERE season = ? AND (home_id = ? OR away_id = ?) ORDER BY competition_id',
+    [season, clubId, clubId],
+  ).map((r) => r.c);
+}
+
+/** Despacho del club: entrenamiento, instalaciones, ojeadores, cupos y cantera. */
+export function office(db: Db, clubId: number) {
+  const u = getUniverse(db)!;
+  const c = db.rows<{ id: number; name: string; cash: number; facilities: number; scouting: number; colors: string | null }>(
+    'SELECT id, name, cash, facilities, scouting, colors FROM club WHERE id = ?',
+    [clubId],
+  )[0]!;
+  const youth = db.rows<{ id: number; name: string; nationality: string; birth_year: number; height_cm: number; pos1: Pos; pos2: Pos | null; potential_est: number; ovr: number }>(
+    `SELECT p.id, p.name, p.nationality, p.birth_year, p.height_cm, p.pos1, p.pos2, p.potential_est, a.ovr
+     FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
+     WHERE p.youth = ? AND p.retired = 0 ORDER BY p.potential_est DESC`,
+    [u.game_season, clubId],
+  ).map((y) => ({ ...y, age: u.game_season - y.birth_year }));
+  return {
+    club: c,
+    season: u.game_season,
+    training: getTraining(db, clubId),
+    cupo: cupoCounts(db, clubId),
+    roster: db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [clubId])[0]!.n,
+    upgrade: {
+      facilities: c.facilities < 5 ? upgradeCost('facilities', c.facilities) : null,
+      scouting: c.scouting < 5 ? upgradeCost('scouting', c.scouting) : null,
+    },
+    scoutError: scoutNoise(c.scouting),
+    youth,
+  };
 }
 
 export { SUMS };

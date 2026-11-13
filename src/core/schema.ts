@@ -5,7 +5,7 @@ import { ATTR_KEYS } from './attributes';
  * Regla: nunca se edita una migración ya publicada; se añade otra al final.
  */
 
-export const APP_VERSION = '0.2.0';
+export const APP_VERSION = '0.5.0';
 export const FORMAT_VERSION = 1;
 /** Hasta la fase 3 no hay motor real: los partidos de prueba son sintéticos. */
 export const ENGINE_VERSION = '0.1';
@@ -192,6 +192,78 @@ MIGRATIONS.push({
   `,
 });
 
+MIGRATIONS.push({
+  version: 3,
+  name: 'quinteto y roles; datos reales importados',
+  sql: `
+    CREATE TABLE lineup (
+      club_id INTEGER NOT NULL, player_id INTEGER NOT NULL, slot INTEGER, role TEXT NOT NULL DEFAULT 'rot',
+      shoot TEXT NOT NULL DEFAULT 'normal',
+      PRIMARY KEY (club_id, player_id)
+    ) WITHOUT ROWID;
+    CREATE TABLE tactics (club_id INTEGER PRIMARY KEY, data TEXT NOT NULL);
+    ALTER TABLE player ADD COLUMN estimated TEXT;
+    CREATE TABLE real_game_line (
+      batch_id INTEGER NOT NULL, season INTEGER NOT NULL, competition TEXT NOT NULL, day INTEGER NOT NULL, game_ext TEXT NOT NULL,
+      player_id INTEGER NOT NULL, team TEXT NOT NULL, opponent TEXT, home INTEGER, win INTEGER, team_pts REAL, opp_pts REAL,
+      min REAL, val REAL, sm_pts REAL,
+      PRIMARY KEY (season, competition, game_ext, player_id)
+    ) WITHOUT ROWID;
+    CREATE INDEX rgl_player ON real_game_line(player_id, season);
+    CREATE TABLE real_prediction (
+      batch_id INTEGER NOT NULL, season INTEGER NOT NULL, day INTEGER NOT NULL, player_id INTEGER NOT NULL,
+      prediction REAL, horizon REAL, price REAL, broker REAL, avg REAL,
+      PRIMARY KEY (season, day, player_id)
+    ) WITHOUT ROWID;
+  `,
+});
+
+MIGRATIONS.push({
+  version: 4,
+  name: 'mercado, contratos, economía, lesiones, moral y noticias',
+  sql: `
+    CREATE TABLE contract (player_id INTEGER PRIMARY KEY, club_id INTEGER NOT NULL, salary INTEGER NOT NULL, until INTEGER NOT NULL);
+    CREATE INDEX contract_club ON contract(club_id);
+    ALTER TABLE club ADD COLUMN cash INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE player ADD COLUMN morale INTEGER NOT NULL DEFAULT 70;
+    ALTER TABLE player ADD COLUMN injury_games INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE player ADD COLUMN injury TEXT;
+    CREATE TABLE transfer (
+      id INTEGER PRIMARY KEY, season INTEGER NOT NULL, day INTEGER NOT NULL, player_id INTEGER NOT NULL,
+      from_club INTEGER, to_club INTEGER, fee INTEGER NOT NULL DEFAULT 0, salary INTEGER, until INTEGER, kind TEXT NOT NULL
+    );
+    CREATE INDEX transfer_player ON transfer(player_id);
+    CREATE TABLE news (
+      id INTEGER PRIMARY KEY, season INTEGER NOT NULL, day INTEGER NOT NULL, club_id INTEGER, player_id INTEGER,
+      kind TEXT NOT NULL, text TEXT NOT NULL
+    );
+    CREATE INDEX news_club ON news(club_id, id);
+    CREATE TABLE club_season_finance (
+      season INTEGER NOT NULL, club_id INTEGER NOT NULL, budget INTEGER NOT NULL, wages INTEGER NOT NULL,
+      prizes INTEGER NOT NULL DEFAULT 0, transfers_in INTEGER NOT NULL DEFAULT 0, transfers_out INTEGER NOT NULL DEFAULT 0,
+      cash_end INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (season, club_id)
+    ) WITHOUT ROWID;
+  `,
+});
+
+MIGRATIONS.push({
+  version: 5,
+  name: 'copa, competiciones europeas, entrenamiento, cantera, ojeadores y colores',
+  sql: `
+    ALTER TABLE club ADD COLUMN colors TEXT;
+    ALTER TABLE club ADD COLUMN facilities INTEGER NOT NULL DEFAULT 3;
+    ALTER TABLE club ADD COLUMN scouting INTEGER NOT NULL DEFAULT 2;
+    ALTER TABLE club ADD COLUMN training TEXT;
+    ALTER TABLE game ADD COLUMN round INTEGER;
+    ALTER TABLE player ADD COLUMN youth INTEGER NOT NULL DEFAULT 0; -- club de la cantera (0 = ninguno)
+    CREATE TABLE comp_group (
+      season INTEGER NOT NULL, competition_id INTEGER NOT NULL, club_id INTEGER NOT NULL, grp TEXT NOT NULL,
+      PRIMARY KEY (season, competition_id, club_id)
+    ) WITHOUT ROWID;
+    UPDATE game SET round = day WHERE stage = 'regular';
+  `,
+});
+
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
 
 export function schemaVersion(db: Db): number {
@@ -224,8 +296,10 @@ export function migrate(db: Db): number {
 export const TABLES = [
   'universe', 'settings', 'schema_migrations', 'competition', 'club', 'player', 'player_attributes', 'season', 'game',
   'game_team_box', 'game_player_box', 'game_shots', 'game_pbp', 'playoff_series', 'season_result',
-  'player_season_stats', 'shot_zone_stats', 'import_batch',
+  'player_season_stats', 'shot_zone_stats', 'import_batch', 'lineup', 'tactics', 'real_game_line', 'real_prediction', 'contract', 'transfer', 'news', 'club_season_finance', 'comp_group',
 ] as const;
+/** Tablas de la partida (todas menos ajustes y migraciones): se vacían al crear un universo. */
+export const GAME_TABLES = ['comp_group', 'lineup', 'tactics', 'real_game_line', 'real_prediction', 'contract', 'transfer', 'news', 'club_season_finance', 'shot_zone_stats', 'player_season_stats', 'season_result', 'playoff_series', 'game_pbp', 'game_shots', 'game_player_box', 'game_team_box', 'game', 'season', 'player_attributes', 'player', 'club', 'competition', 'universe', 'import_batch'];
 
 export function getSetting(db: Db, key: string): string | null {
   return db.rows<{ value: string }>('SELECT value FROM settings WHERE key = ?', [key])[0]?.value ?? null;

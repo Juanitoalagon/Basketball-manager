@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { TABLES } from '../core/schema';
+import { COMP_INFO } from '../core/names';
 import type * as Q from '../core/queries';
 import type { DayReport } from '../core/season';
 import { call, cancelLoad, setProgressListener } from '../db/client';
 import type { ImportReport, LoadProgress, LoadResult, Status } from '../db/protocol';
 import { type Nav, Loading, Tabs, f0, seasonLabel, useData } from './kit';
 import { GameScreen, GamesScreen, HomeScreen, LeagueScreen, PlayerScreen, SquadScreen } from './screens';
+import { PlayersScreen } from './market';
+import { LiveScreen } from './live';
 
 const mb = (b: number) => (b < 1024 * 1024 ? `${Math.round(b / 1024)} KB` : `${(b / 1024 / 1024).toFixed(1)} MB`);
 const fecha = (iso: string | number | null) => (iso ? new Date(iso).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' }) : 'nunca');
 const num = (n: number) => n.toLocaleString('es-ES');
 
-type TabKey = 'home' | 'squad' | 'games' | 'league' | 'data';
-type View = { kind: 'player'; id: number } | { kind: 'game'; id: number } | { kind: 'club'; id: number };
+type TabKey = 'home' | 'squad' | 'players' | 'games' | 'league' | 'data';
+type View = { kind: 'player'; id: number } | { kind: 'game'; id: number } | { kind: 'club'; id: number } | { kind: 'live' };
 
 export function App() {
   const [st, setSt] = useState<Status | null>(null);
@@ -56,6 +59,7 @@ export function App() {
     player: (id) => push({ kind: 'player', id }),
     game: (id) => push({ kind: 'game', id }),
     club: (id) => push({ kind: 'club', id }),
+    live: () => push({ kind: 'live' }),
     back: () => history.back(),
   };
 
@@ -80,17 +84,19 @@ export function App() {
   return (
     <>
       <main>
-        {top?.kind === 'player' ? <PlayerScreen id={top.id} nav={nav} /> :
+        {top?.kind === 'live' ? <LiveScreen nav={nav} onDone={(gid) => { setStack((s) => [...s.slice(0, -1), { kind: 'game', id: gid }]); setLog(null); void refresh(); }} /> :
+         top?.kind === 'player' ? <PlayerScreen id={top.id} nav={nav} myClub={u.user_club_id} onChanged={() => void refresh()} /> :
          top?.kind === 'game' ? <GameScreen id={top.id} nav={nav} /> :
          top?.kind === 'club' ? <SquadScreen clubId={top.id} nav={nav} isMine={top.id === u.user_club_id} onBack={nav.back} /> :
          tab === 'home' ? <HomeScreen nav={nav} onChanged={() => void refresh()} log={log} setLog={setLog} /> :
          tab === 'squad' ? <SquadScreen clubId={u.user_club_id} nav={nav} isMine /> :
+         tab === 'players' ? <PlayersScreen nav={nav} myClub={u.user_club_id} /> :
          tab === 'games' ? <GamesScreen clubId={u.user_club_id} nav={nav} /> :
          tab === 'league' ? <LeagueScreen nav={nav} myClub={u.user_club_id} /> :
          <DataScreen st={st} setSt={setSt} onChanged={changed} />}
       </main>
       <nav className="bottom">
-        {([['home', 'Inicio', '⌂'], ['squad', 'Equipo', '☰'], ['games', 'Partidos', '◷'], ['league', 'Liga', '★'], ['data', 'Datos', '⛁']] as [TabKey, string, string][]).map(([k, label, icon]) => (
+        {([['home', 'Inicio', '⌂'], ['squad', 'Equipo', '☰'], ['players', 'Jugadores', '⌕'], ['games', 'Partidos', '◷'], ['league', 'Liga', '★'], ['data', 'Datos', '⛁']] as [TabKey, string, string][]).map(([k, label, icon]) => (
           <button key={k} className={tab === k && !top ? 'on' : ''} onClick={() => { if (stack.length) history.go(-stack.length); setStack([]); setTab(k); window.scrollTo(0, 0); }}>
             <span className="ic" aria-hidden="true">{icon}</span>
             {label}
@@ -101,40 +107,84 @@ export function App() {
   );
 }
 
+interface RealPreview { teams: { name: string; code: string | null; players: number }[]; players: number; unmatched: string[]; prevMatched: number; currentDays: number; files: string[] }
+
 function NewGame({ onDone, hasGame }: { onDone: (s: Status) => void; hasGame: boolean }) {
   const [name, setName] = useState('Mi carrera');
+  const [kind, setKind] = useState<'real' | 'gen'>('real');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [preview, setPreview] = useState<RealPreview | null>(null);
+  const [fileName, setFileName] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
+  const pick = async (f: File | undefined) => {
+    if (!f) return;
+    setBusy(true);
+    setErr(null);
+    setPreview(null);
+    try {
+      setPreview(await call<RealPreview>('previewReal', { bytes: new Uint8Array(await f.arrayBuffer()) }));
+      setFileName(f.name);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  };
+  const create = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const seed = Math.floor(Math.random() * 2 ** 31);
+      onDone(await call<Status>(kind === 'real' ? 'createReal' : 'newGame', { name: name.trim(), seed, fileName }));
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <main>
       <h1>Basketball Manager Advanced</h1>
       <section>
         <h2>Nueva partida</h2>
-        <p className="muted">
-          Se crea un universo generado: Liga ACB y Primera FEB con 18 clubes ficticios cada una y 432 jugadores inventados. Los datos reales de SuperManager llegarán con el importador.
-        </p>
         <label>
           Nombre de la partida
           <input type="text" value={name} maxLength={40} onChange={(e) => setName(e.target.value)} />
         </label>
+        <Tabs<'real' | 'gen'> value={kind} onChange={setKind} options={[['real', 'ACB real (SuperManagerLab)'], ['gen', 'Universo inventado']]} />
+        {kind === 'gen' ? (
+          <p className="muted">Liga ACB y Primera FEB con 36 clubes ficticios y 432 jugadores inventados.</p>
+        ) : (
+          <>
+            <p className="muted">
+              Elige el zip de la carpeta <b>datos</b> de SuperManagerLab. La Liga ACB se crea con sus clubes y jugadores reales; la Primera FEB, inventada.
+              Como esos datos solo traen minutos y valoración por partido, el nivel de cada jugador se estima a partir de ellos y sus atributos concretos, edad y altura son estimados.
+            </p>
+            <div className="row">
+              <button className="sec" disabled={busy} onClick={() => fileRef.current?.click()}>{preview ? 'Elegir otro zip' : 'Elegir zip de datos'}</button>
+              <input ref={fileRef} type="file" accept=".zip,application/zip" hidden onChange={(e) => void pick(e.target.files?.[0])} />
+            </div>
+            {preview && (
+              <div className="card">
+                <p><b>{preview.teams.length} clubes y {preview.players} jugadores</b> con {preview.currentDays} jornadas de esta temporada. {preview.prevMatched} jugadores enlazados con la temporada anterior.</p>
+                {preview.unmatched.length > 0 && (
+                  <details className="gloss">
+                    <summary>{preview.unmatched.length} sin ficha completa (se importan con su nombre corto y posición estimada)</summary>
+                    <p className="muted small">{preview.unmatched.join(' · ')}</p>
+                  </details>
+                )}
+                <p className="muted small">{preview.teams.map((t) => `${t.name} (${t.players})`).join(' · ')}</p>
+              </div>
+            )}
+          </>
+        )}
         {hasGame && <p className="warn">Sustituirá a la partida actual (se guarda una copia interna antes).</p>}
         {err && <p className="error">{err}</p>}
         <div className="row">
-          <button
-            disabled={busy || !name.trim()}
-            onClick={async () => {
-              setBusy(true);
-              setErr(null);
-              try {
-                onDone(await call<Status>('newGame', { name: name.trim(), seed: Math.floor(Math.random() * 2 ** 31) }));
-              } catch (e) {
-                setErr((e as Error).message);
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            {busy ? 'Creando…' : 'Crear universo'}
+          <button disabled={busy || !name.trim() || (kind === 'real' && !preview)} onClick={() => void create()}>
+            {busy ? 'Un momento…' : 'Crear partida'}
           </button>
         </div>
       </section>
@@ -150,13 +200,13 @@ function ChooseClub({ onDone }: { onDone: (s: Status) => void }) {
   return (
     <main>
       <h1>Elige tu club</h1>
-      <p className="muted">«Nivel» es la media de sus 8 mejores jugadores. Un club modesto es un reto mayor.</p>
+      <p className="muted">«Nivel» es la media de sus 8 mejores jugadores. Un club modesto es un reto mayor. Las etiquetas indican quién juega en Europa (EL EuroLeague, EC EuroCup, BCL Champions League).</p>
       <Tabs<string> value={String(comp)} onChange={(v) => setComp(Number(v))} options={[['1', 'Liga ACB'], ['2', 'Primera FEB']]} />
       <ul className="plain clubs">
         {data.filter((c) => c.competition_id === comp).map((c) => (
           <li key={c.id}>
             <div>
-              <b>{c.name}</b>
+              <b>{c.name}</b> {c.euro && <span className={`compbadge c${c.euro}`}>{COMP_INFO[c.euro]?.short}</span>}
               <div className="muted small">Nivel {c.level} · presupuesto {f0(c.budget / 1e6)} M€ · reputación {c.reputation}</div>
             </div>
             <button disabled={busy} onClick={async () => { setBusy(true); try { onDone(await call<Status>('chooseClub', { clubId: c.id })); } finally { setBusy(false); } }}>Elegir</button>

@@ -2,7 +2,13 @@
 
 Simulador y gestión de baloncesto para móvil. Todo se guarda en el dispositivo; no hay servidor.
 
-**Estado: versión 0.2.0 (fases 0 a 4, primera versión jugable).**
+**Estado: versión 0.5.0.** Novedades de la 0.5: cupos (mínimo 4 nacionales, máximo 2 extracomunitarios) con etiquetas NAC/COM/EXT y filtro en Jugadores; Copa del Rey; EuroLeague, EuroCup y Basketball Champions League con 36 clubes extranjeros (nombres públicos, plantillas inventadas); entrenamiento (foco e intensidad), instalaciones y ojeadores; cantera con juveniles que puedes subir; fichajes de urgencia de la IA durante la temporada; caras generadas para los jugadores inventados; y un directo más visual (pista con los tiros, evolución del marcador, cambios tocando las caras).
+
+**Versión 0.4.0.** Novedades de la 0.4: clubes reales de la Liga ACB y la Primera FEB 2026-27 (plantillas inventadas), pestaña Jugadores con las estadísticas de toda la liga y agentes libres, mercado (fichar, comprar, vender, renovar, rescindir), contratos y finanzas, IA de los clubes en pretemporada, lesiones, moral, noticias y partido en directo con cambios, tiempos muertos y plan de tiro.
+
+**Versión 0.3.0.** Novedades de la 0.3: Liga ACB real desde el zip de SuperManagerLab, quinteto, rotación y plan de tiro, tendencias de tiro, T2% y T1%, victorias añadidas y marcador de victorias en directo al simular.
+
+**Versión 0.2.0 (fases 0 a 4, primera versión jugable).**
 
 - Nueva partida con un universo generado: Liga ACB y Primera FEB, 36 clubes y 432 jugadores ficticios.
 - Eliges club y simulas jornada a jornada, de 5 en 5, hasta los playoffs o hasta final de temporada.
@@ -46,3 +52,9 @@ npm run dev     # servidor local de desarrollo
 - `src/db/` hilo de trabajo con SQLite (OPFS) y cliente de mensajes.
 - `src/ui/` interfaz React.
 - `docs/` la app compilada, lista para GitHub Pages.
+
+## Créditos y licencias de terceros
+
+- Caras de los jugadores: [facesjs](https://github.com/zengm-games/facesjs), de ZenGM, licencia Apache-2.0.
+- Base de datos: SQLite (dominio público) compilado a WebAssembly.
+- Nombres de clubes: nombres públicos de los clubes reales. Sus plantillas, jugadores y estadísticas en el juego son inventados.

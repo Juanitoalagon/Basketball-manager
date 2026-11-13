@@ -63,3 +63,53 @@ describe('motor de partido', () => {
     expect(out).toEqual([]);
   }, 120_000);
 });
+
+describe('órdenes del entrenador', () => {
+  it('el plan de tiro cambia el reparto de tiros y forzar un tiro lo empeora', () => {
+    const base = teams[2]!;
+    const stats = (t: typeof base) => {
+      let f3 = 0, fga = 0, m3 = 0;
+      for (let g = 0; g < 300; g++) {
+        const r = simulateGame(t, teams[5]!, 5000 + g);
+        for (const [id, b] of r.box) if (r.side.get(id) === 0) { f3 += b[F.fga3]!; fga += b[F.fga2]! + b[F.fga3]!; m3 += b[F.fgm3]!; }
+      }
+      return { rate: f3 / fga, pct: m3 / f3 };
+    };
+    const normal = stats(base);
+    const mas = stats({ ...base, tactics: { shot: { rim: 'normal', paint: 'normal', mid: 'normal', three: 'mas' } } });
+    const menos = stats({ ...base, tactics: { shot: { rim: 'normal', paint: 'normal', mid: 'normal', three: 'menos' } } });
+    expect(mas.rate).toBeGreaterThan(normal.rate + 0.05);
+    expect(menos.rate).toBeLessThan(normal.rate - 0.05);
+    expect(mas.pct).toBeLessThan(normal.pct);
+    expect(menos.pct).toBeGreaterThan(normal.pct);
+  }, 60_000);
+
+  it('el quinteto elegido sale de titular y un jugador fuera de la rotación casi no juega', () => {
+    const t = teams[3]!;
+    const ids = t.players.map((p) => p.id);
+    const starters = [ids[11]!, ids[10]!, ids[9]!, ids[8]!, ids[7]!];
+    const out = ids[0]!;
+    const r = simulateGame({ ...t, lineup: { starters, roles: { [out]: 'fuera' } } }, teams[4]!, 77);
+    for (const id of starters) expect(r.starters.has(id)).toBe(true);
+    expect(r.box.get(out)![F.sec]!).toBeLessThan(120);
+  });
+});
+
+describe('partido en directo', () => {
+  it('una orden en la posesión k no cambia nada antes de k y sí se aplica', () => {
+    const [h, a] = [teams[6]!, teams[7]!];
+    const base = simulateGame(h, a, 4242, { pbp: true, timeline: true });
+    const k = 70;
+    const snap = base.timeline!.find((t) => t.i === k)!;
+    const out = snap.court[0][0]!;
+    const inn = h.players.map((p) => p.id).find((id) => !snap.court[0].includes(id) && snap.fouls[id]! < 5)!;
+    const r = simulateGame(h, a, 4242, { pbp: true, timeline: true, interventions: [{ at: k, side: 0, kind: 'auto', on: false }, { at: k, side: 0, kind: 'sub', in: inn, out }] });
+    expect(r.timeline!.slice(0, k + 1).map((t) => t.score)).toEqual(base.timeline!.slice(0, k + 1).map((t) => t.score));
+    expect(r.pbp!.filter((e) => e[7]! < k)).toEqual(base.pbp!.filter((e) => e[7]! < k));
+    const after = r.timeline!.find((t) => t.i === k + 1)!;
+    expect(after.court[0]).toContain(inn);
+    expect(after.court[0]).not.toContain(out);
+    // Con los cambios automáticos apagados, el que entra sigue en pista unas cuantas posesiones.
+    expect(r.timeline!.find((t) => t.i === k + 9)!.court[0]).toContain(inn);
+  });
+});
