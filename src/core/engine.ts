@@ -1,0 +1,495 @@
+/**
+ * Motor de partido posesión a posesión (reglas FIBA).
+ *
+ * Toda probabilidad sigue la misma forma:
+ *   P = sigmoide( logit(base) + beta · (ataque − defensa) / 20 + contexto )
+ * "base" es la tasa media de la liga para ese suceso; con dos jugadores iguales, sale la media.
+ * Las constantes están en TUNE, documentadas, y las ajusta el banco de calibración (tests/calibration).
+ * Todo lo aleatorio sale de la semilla del partido: misma semilla y mismas plantillas = mismo partido.
+ */
+import { type Attrs, type Pos, POSITIONS, overallAt } from './attributes';
+import { type ShotKind, sampleShot, zoneOf } from './court';
+import { Rng } from './rng';
+
+export const TUNE = {
+  /** Aciertos base por tipo de tiro con ataque = defensa. */
+  make: { rim: 0.7, paint: 0.47, mid: 0.42, three: 0.29 } as Record<ShotKind, number>,
+  bMake: 0.42, // cuánto pesa 20 puntos de diferencia ataque-defensa en el acierto (logit)
+  cornerBonus: 0.12, // el triple de esquina es algo más fácil
+  assistedBonus: 0.18,
+  transitionBonus: 0.3,
+  homeBonus: 0.06,
+  buzzerPenalty: -0.5,
+  /** Reparto de tipos de tiro (multiplicadores globales). */
+  kind: { rim: 1.0, paint: 0.42, mid: 0.48, three: 1.3 } as Record<ShotKind, number>,
+  kindK: 0.055, // cuánto empuja la habilidad hacia su tipo de tiro preferido
+  cornerShare: 0.27,
+  /** Pérdidas por posesión (y fase tras rebote ofensivo). */
+  tov: 0.165,
+  bTov: 0.4,
+  stealShare: 0.52,
+  /** Faltas. */
+  nonShootingFoul: 0.17,
+  shootFoul: { rim: 0.21, paint: 0.13, mid: 0.04, three: 0.017 } as Record<ShotKind, number>,
+  /** Tapones. */
+  block: { rim: 0.06, paint: 0.05, mid: 0.017, three: 0.008 } as Record<ShotKind, number>,
+  bBlock: 0.55,
+  /** Asistencias: probabilidad de que el tiro venga de un pase. */
+  assistOpp: { rim: 0.46, paint: 0.32, mid: 0.35, three: 0.78 } as Record<ShotKind, number>,
+  bAssist: 0.3,
+  /** Rebote ofensivo tras fallo de campo y tras último tiro libre. */
+  oreb: 0.31,
+  orebFt: 0.13,
+  bReb: 0.55,
+  putback: 0.42,
+  /** Libres: acierto con atributo 60. */
+  ft: 0.755,
+  ftK: 0.045,
+  /** Ritmo: segundos medios de una posesión en estático y probabilidad de transición. */
+  possSec: 17.4,
+  possSd: 4.2,
+  transition: 0.14,
+  /** Fatiga: gasto por segundo en pista, recuperación por segundo en el banquillo, y penalización. */
+  drain: 0.00112,
+  recover: 0.0016,
+  fatiguePenalty: 22,
+  subMargin: 2.5,
+  usageK: 0.075,
+  formSd: 4,
+  /** Quien gana de mucho al final se relaja un poco. */
+  garbageRelax: -0.25,
+  /** Regresión del marcador: quien va por delante baja algo la intensidad; quien va por detrás aprieta. Por cada 10 puntos. */
+  scoreRegression: 0.09,
+};
+
+export const BOX_FIELDS = ['sec', 'pts', 'fgm2', 'fga2', 'fgm3', 'fga3', 'ftm', 'fta', 'orb', 'drb', 'ast', 'stl', 'blk', 'tov', 'pf', 'fd', 'blka', 'pm'] as const;
+export type BoxField = (typeof BOX_FIELDS)[number];
+const F = Object.fromEntries(BOX_FIELDS.map((f, i) => [f, i])) as Record<BoxField, number>;
+
+export interface EnginePlayer {
+  id: number;
+  pos1: Pos;
+  pos2: Pos | null;
+  height_cm: number;
+  attrs: Attrs;
+}
+export interface EngineTeam {
+  clubId: number;
+  players: EnginePlayer[];
+}
+
+/** Códigos del relato jugada a jugada. Cada evento: [tipo, cuarto, segundos restantes, lado, p1, p2, extra]. */
+export const EV = { MADE: 1, MISS: 2, FT_MADE: 3, FT_MISS: 4, OREB: 5, DREB: 6, TOV: 7, FOUL: 8, SUB: 9, START: 10, END: 11 } as const;
+export const KIND_CODE: Record<ShotKind, number> = { rim: 0, paint: 1, mid: 2, three: 3 };
+
+export interface GameResult {
+  score: [number, number];
+  ot: number;
+  poss: [number, number];
+  box: Map<number, number[]>;
+  side: Map<number, 0 | 1>;
+  starters: Set<number>;
+  /** Por tiro: jugador, x, y, empaquetado (zona | acierto<<4 | asistido<<5 | taponado<<6 | rebote<<7 | cuarto<<8). */
+  shots: number[];
+  pbp: number[][] | null;
+}
+
+interface R {
+  three: number; mid: number; rim: number; post: number; ft: number; pass: number; handle: number; usage: number;
+  oreb: number; dreb: number; perD: number; intD: number; rimProt: number; steal: number; foulDraw: number;
+  disc: number; sta: number; clutch: number; help: number;
+}
+interface Live {
+  p: EnginePlayer;
+  r: R;
+  kindW: Record<ShotKind, number>;
+  energy: number;
+  fouls: number;
+  box: number[];
+  onCourt: boolean;
+}
+interface Side {
+  idx: 0 | 1;
+  all: Live[];
+  court: Live[]; // 5, ordenados por hueco PG..C
+  teamFouls: number;
+}
+
+const sig = (x: number) => 1 / (1 + Math.exp(-x));
+const logit = (p: number) => Math.log(p / (1 - p));
+
+function ratings(a: Attrs, heightCm: number, form: number): R {
+  const h = (heightCm - 200) * 0.6;
+  return {
+    three: a.sht3 + 0.1 * (a.offb - 50) + form,
+    mid: 0.7 * a.sht2 + 0.3 * a.cre + form,
+    rim: 0.5 * a.fin + 0.25 * a.drive + 0.125 * (a.str + a.jmp) + h * 0.5 + form,
+    post: 0.6 * a.post + 0.2 * a.str + 0.2 * a.fin + h * 0.5 + form,
+    ft: a.ft + form * 0.5,
+    pass: 0.5 * a.pas + 0.5 * a.vis,
+    handle: 0.6 * a.hdl + 0.25 * a.iq + 0.15 * a.vis,
+    usage: 0.4 * a.cre + 0.15 * a.drive + 0.15 * Math.max(a.sht3, a.sht2) + 0.15 * a.post * 0.6 + 0.15 * a.fin,
+    oreb: 0.6 * a.oreb + 0.2 * a.jmp + 0.2 * a.str + h,
+    dreb: 0.6 * a.dreb + 0.2 * a.jmp + 0.2 * a.str + h,
+    perD: 0.55 * a.perd + 0.15 * a.agi + 0.15 * a.spd + 0.15 * a.ant,
+    intD: 0.6 * a.intd + 0.2 * a.str + 0.2 * a.jmp + h * 0.5,
+    rimProt: 0.4 * a.blk + 0.3 * a.intim + 0.3 * a.intd + h,
+    steal: 0.5 * a.stl + 0.5 * a.ant,
+    foulDraw: 0.4 * a.drive + 0.3 * a.fin + 0.3 * a.str,
+    disc: a.disc,
+    sta: a.sta,
+    clutch: a.clutch,
+    help: a.hlpd,
+  };
+}
+
+function weighted<T>(rng: Rng, items: T[], w: (t: T) => number): T {
+  let total = 0;
+  const ws = items.map((it) => {
+    const x = Math.max(1e-9, w(it));
+    total += x;
+    return x;
+  });
+  let r = rng.next() * total;
+  for (let i = 0; i < items.length; i++) {
+    r -= ws[i]!;
+    if (r <= 0) return items[i]!;
+  }
+  return items[items.length - 1]!;
+}
+
+export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, opts: { pbp?: boolean } = {}): GameResult {
+  const rng = new Rng(seed);
+  const T = TUNE;
+  const pbp: number[][] | null = opts.pbp ? [] : null;
+  const shots: number[] = [];
+  const score: [number, number] = [0, 0];
+  const poss: [number, number] = [0, 0];
+  let period = 1;
+  let clock = 600;
+
+  const mkSide = (t: EngineTeam, idx: 0 | 1): Side => {
+    const all = t.players.map<Live>((p) => {
+      const form = (rng.next() + rng.next() + rng.next() - 1.5) * T.formSd * 1.4 * (1 - p.attrs.cons / 150);
+      const r = ratings(p.attrs, p.height_cm, form);
+      const ex = (x: number) => Math.exp(T.kindK * (x - 50));
+      return {
+        p, r, energy: 1, fouls: 0, onCourt: false,
+        box: new Array(BOX_FIELDS.length).fill(0),
+        kindW: { rim: T.kind.rim * ex(r.rim), paint: T.kind.paint * ex(r.post), mid: T.kind.mid * ex(r.mid), three: T.kind.three * ex(r.three) },
+      };
+    });
+    return { idx, all, court: [], teamFouls: 0 };
+  };
+  const sides: [Side, Side] = [mkSide(home, 0), mkSide(away, 1)];
+  const ev = (type: number, side: number, p1 = 0, p2 = 0, extra = 0) => pbp?.push([type, period, Math.ceil(clock), side, p1, p2, extra]);
+
+  const eff = (l: Live, x: number) => x - (1 - l.energy) * T.fatiguePenalty;
+  // Tiempo de la basura: con el partido decidido, los dos entrenadores sacan al banquillo.
+  const garbage = () => {
+    const m = Math.abs(score[0] - score[1]);
+    return period >= 4 && ((clock < 360 && m >= 20) || (clock < 180 && m >= 14));
+  };
+  const value = (l: Live, slot: Pos) => {
+    const v = overallAt(l.p.attrs, l.p, slot) - (1 - l.energy) * 40;
+    return garbage() ? 100 - v - (1 - l.energy) * 40 : v;
+  };
+
+  // Quinteto inicial: asignación voraz de los mejores a cada hueco.
+  const starters = new Set<number>();
+  for (const s of sides) {
+    const pairs: { l: Live; slot: number; v: number }[] = [];
+    s.all.forEach((l) => POSITIONS.forEach((pos, slot) => pairs.push({ l, slot, v: overallAt(l.p.attrs, l.p, pos) })));
+    pairs.sort((a, b) => b.v - a.v);
+    const court: (Live | undefined)[] = new Array(5).fill(undefined);
+    for (const pr of pairs) {
+      if (court[pr.slot] || pr.l.onCourt) continue;
+      court[pr.slot] = pr.l;
+      pr.l.onCourt = true;
+      starters.add(pr.l.p.id);
+    }
+    s.court = court.filter((x): x is Live => !!x);
+  }
+
+  const autoSubs = (s: Side) => {
+    for (let slot = 0; slot < s.court.length; slot++) {
+      const cur = s.court[slot]!;
+      const pos = POSITIONS[slot]!;
+      const forced = cur.fouls >= 5;
+      let best: Live | null = null;
+      let bestV = forced ? -Infinity : value(cur, pos) + T.subMargin;
+      for (const b of s.all) {
+        if (b.onCourt || b.fouls >= 5) continue;
+        const v = value(b, pos);
+        if (v > bestV) {
+          bestV = v;
+          best = b;
+        }
+      }
+      if (best) {
+        cur.onCourt = false;
+        best.onCourt = true;
+        s.court[slot] = best;
+        ev(EV.SUB, s.idx, best.p.id, cur.p.id);
+      }
+    }
+  };
+
+  const spend = (t: number) => {
+    clock -= t;
+    for (const s of sides) {
+      for (const l of s.all) {
+        if (l.onCourt) {
+          l.box[F.sec] += t;
+          l.energy = Math.max(0.3, l.energy - t * T.drain * (1.35 - (l.r.sta / 100) * 0.7));
+        } else {
+          l.energy = Math.min(1, l.energy + t * T.recover);
+        }
+      }
+    }
+  };
+  const addPts = (s: Side, l: Live, n: number) => {
+    l.box[F.pts] += n;
+    score[s.idx] += n;
+    for (const x of sides[s.idx].court) x.box[F.pm] += n;
+    for (const x of sides[1 - s.idx]!.court) x.box[F.pm] -= n;
+  };
+  const avg = (xs: Live[], f: (l: Live) => number) => xs.reduce((a, l) => a + f(l), 0) / xs.length;
+
+  /** Rebote tras un fallo. Devuelve quién lo coge si es ofensivo; null si es defensivo. */
+  const rebound = (O: Side, D: Side, base: number, blocked: boolean): Live | null => {
+    const diff = avg(O.court, (l) => eff(l, l.r.oreb)) - avg(D.court, (l) => eff(l, l.r.dreb));
+    const offensive = rng.chance(sig(logit(base) + T.bReb * diff / 20 - (blocked ? 0.3 : 0)));
+    const S = offensive ? O : D;
+    const who = weighted(rng, S.court, (l) => Math.pow(Math.max(5, offensive ? l.r.oreb : l.r.dreb) / 50, 3));
+    who.box[offensive ? F.orb : F.drb] += 1;
+    ev(offensive ? EV.OREB : EV.DREB, S.idx, who.p.id);
+    return offensive ? who : null;
+  };
+
+  /** Tiros libres. Devuelve 'oreb' si el último falla y lo recoge el ataque. */
+  const freeThrows = (O: Side, D: Side, shooter: Live, n: number): 'end' | 'oreb' => {
+    for (let i = 0; i < n; i++) {
+      shooter.box[F.fta] += 1;
+      const clutch = period >= 4 && clock < 120 && Math.abs(score[0] - score[1]) <= 6 ? 0.2 * (shooter.r.clutch - 50) / 50 : 0;
+      if (rng.chance(sig(logit(T.ft) + T.ftK * (shooter.r.ft - 60) + clutch))) {
+        shooter.box[F.ftm] += 1;
+        addPts(O, shooter, 1);
+        ev(EV.FT_MADE, O.idx, shooter.p.id);
+      } else {
+        ev(EV.FT_MISS, O.idx, shooter.p.id);
+        if (i === n - 1) return rebound(O, D, T.orebFt, false) ? 'oreb' : 'end';
+      }
+    }
+    return 'end';
+  };
+
+  const foul = (D: Side, fouler: Live, fouled: Live, shooting: boolean) => {
+    fouler.box[F.pf] += 1;
+    fouler.fouls += 1;
+    fouled.box[F.fd] += 1;
+    D.teamFouls += 1;
+    ev(EV.FOUL, D.idx, fouler.p.id, fouled.p.id, shooting ? 1 : 0);
+  };
+
+  /** Una posesión completa. Devuelve si acabó con balón vivo (opción de transición para el rival). */
+  const possession = (o: 0 | 1, transitionIn: boolean): boolean => {
+    const O = sides[o];
+    const D = sides[1 - o]!;
+    poss[o] += 1;
+    let shotClock = 24;
+    let transition = transitionIn && rng.chance(T.transition);
+    let putbackBy: Live | null = null;
+    let nsFoulDone = false;
+
+    for (let phase = 0; phase < 8; phase++) {
+      if (clock <= 0) return false;
+      let dur = transition ? 3 + rng.next() * 4 : Math.min(shotClock - 0.5, Math.max(3, T.possSec + (rng.next() + rng.next() + rng.next() - 1.5) * T.possSd * 1.4));
+      if (putbackBy) dur = 1 + rng.next() * 2;
+      let buzzer = false;
+      if (dur >= clock) {
+        dur = clock;
+        buzzer = true;
+      }
+
+      // Pérdida
+      if (!putbackBy) {
+        const handler = weighted(rng, O.court, (l) => Math.pow(Math.max(5, l.r.handle) / 50, 4));
+        const pT = sig(logit(T.tov) - T.bTov * (eff(handler, handler.r.handle) - avg(D.court, (l) => eff(l, l.r.steal))) / 20);
+        if (rng.chance(pT * (phase > 0 ? 0.6 : 1))) {
+          spend(dur * (0.3 + rng.next() * 0.7));
+          const who = rng.chance(0.65) ? handler : weighted(rng, O.court, (l) => 60 - l.r.handle / 2);
+          who.box[F.tov] += 1;
+          const pSteal = T.stealShare + 0.25 * (avg(D.court, (l) => l.r.steal) - 50) / 50;
+          let stealer = 0;
+          if (rng.chance(pSteal)) {
+            const st = weighted(rng, D.court, (l) => Math.pow(Math.max(5, l.r.steal) / 50, 3));
+            st.box[F.stl] += 1;
+            stealer = st.p.id;
+          }
+          ev(EV.TOV, o, who.p.id, stealer);
+          if (!stealer) {
+            autoSubs(O);
+            autoSubs(D);
+          }
+          return stealer !== 0;
+        }
+      }
+
+      // Falta sin tiro
+      if (!nsFoulDone && !putbackBy && !buzzer && rng.chance(T.nonShootingFoul)) {
+        nsFoulDone = true;
+        const t = Math.max(1, dur * rng.next() * 0.8);
+        spend(t);
+        shotClock = Math.max(14, shotClock - t);
+        const fouler = weighted(rng, D.court, (l) => 110 - l.r.disc);
+        const fouled = weighted(rng, O.court, (l) => l.r.foulDraw);
+        foul(D, fouler, fouled, false);
+        autoSubs(O);
+        autoSubs(D);
+        if (D.teamFouls > 4) {
+          const res = freeThrows(O, D, fouled, 2);
+          if (res === 'end') return false;
+          shotClock = 14;
+          continue;
+        }
+        if (clock <= 0) return false;
+        continue;
+      }
+
+      // Tiro
+      const shooter = putbackBy ?? weighted(rng, O.court, (l) => Math.exp(T.usageK * (eff(l, l.r.usage) - 55)));
+      const slot = O.court.indexOf(shooter);
+      const defender = D.court[slot] ?? D.court[0]!;
+      let kind: ShotKind;
+      if (putbackBy) kind = rng.chance(0.85) ? 'rim' : 'paint';
+      else {
+        const w = { ...shooter.kindW };
+        if (transition) {
+          w.rim *= 2.2;
+          w.mid *= 0.5;
+        }
+        kind = weighted(rng, ['rim', 'paint', 'mid', 'three'] as ShotKind[], (k) => w[k]);
+      }
+      const corner = kind === 'three' && rng.chance(T.cornerShare + (shooter.r.three - 50) * 0.002);
+      const others = O.court.filter((l) => l !== shooter);
+      const teamPass = avg(others, (l) => l.r.pass);
+      const assistedOpp = !putbackBy && rng.chance(sig(logit(T.assistOpp[kind]) + T.bAssist * (teamPass - 50) / 20));
+      const off = eff(shooter, kind === 'three' ? shooter.r.three : kind === 'mid' ? shooter.r.mid : kind === 'rim' ? shooter.r.rim : shooter.r.post);
+      const help = avg(D.court, (l) => l.r.help);
+      const rimP = Math.max(...D.court.map((l) => eff(l, l.r.rimProt)));
+      const def =
+        kind === 'three' || kind === 'mid'
+          ? 0.7 * eff(defender, defender.r.perD) + 0.3 * help
+          : kind === 'rim'
+            ? 0.4 * eff(defender, defender.r.intD) + 0.6 * rimP
+            : 0.5 * eff(defender, defender.r.intD) + 0.5 * rimP;
+      const margin = score[o] - score[1 - o];
+      const clutch = period >= 4 && clock < 120 && Math.abs(margin) <= 6 ? 0.25 * (shooter.r.clutch - 50) / 50 : 0;
+      let lg =
+        logit(T.make[kind]) + T.bMake * (off - def) / 20 + (assistedOpp ? T.assistedBonus : -0.04) +
+        (transition ? T.transitionBonus : 0) + (o === 0 ? T.homeBonus : -T.homeBonus) + clutch +
+        (corner ? T.cornerBonus : 0) + (buzzer ? T.buzzerPenalty : 0) + (putbackBy ? 0.1 : 0) +
+        (garbage() && margin > 0 ? T.garbageRelax : 0) - T.scoreRegression * Math.max(-25, Math.min(25, margin)) / 10;
+      const pFoul = sig(logit(T.shootFoul[kind]) + 0.4 * (shooter.r.foulDraw - 50) / 20 + 0.3 * (50 - defender.r.disc) / 20);
+      const fouled = !buzzer && rng.chance(pFoul);
+      if (fouled) lg -= 0.55; // los tiros con falta entran menos
+      const blocker = kind === 'rim' || kind === 'paint' ? weighted(rng, D.court, (l) => Math.pow(Math.max(5, l.r.rimProt) / 50, 4)) : defender;
+      const blocked = !fouled && rng.chance(sig(logit(T.block[kind]) + T.bBlock * (eff(blocker, blocker.r.rimProt) - off) / 20));
+      const made = !blocked && rng.chance(sig(lg));
+      spend(dur);
+
+      const three = kind === 'three';
+      shooter.box[three ? F.fga3 : F.fga2] += 1;
+      let passer: Live | null = null;
+      if (made) {
+        shooter.box[three ? F.fgm3 : F.fgm2] += 1;
+        addPts(O, shooter, three ? 3 : 2);
+        if (assistedOpp) {
+          passer = weighted(rng, others, (l) => Math.pow(Math.max(5, l.r.pass) / 50, 2.5));
+          passer.box[F.ast] += 1;
+        }
+      }
+      if (blocked) {
+        blocker.box[F.blk] += 1;
+        shooter.box[F.blka] += 1;
+      }
+      const pt = sampleShot(rng, kind, { corner });
+      const zone = zoneOf(pt.x, pt.y);
+      shots.push(shooter.p.id, pt.x, pt.y, zone | (made ? 16 : 0) | (passer ? 32 : 0) | (blocked ? 64 : 0) | (putbackBy ? 128 : 0) | (Math.min(period, 15) << 8));
+      ev(made ? EV.MADE : EV.MISS, o, shooter.p.id, passer?.p.id ?? (blocked ? blocker.p.id : 0), KIND_CODE[kind] + (three ? 30 : 20) + (blocked ? 100 : 0) + (pt.x + 100) * 1000);
+      putbackBy = null;
+      transition = false;
+
+      if (fouled) {
+        const fouler = kind === 'rim' || kind === 'paint' ? (rng.chance(0.5) ? defender : blocker) : defender;
+        foul(D, fouler, shooter, true);
+        autoSubs(O);
+        autoSubs(D);
+        const res = freeThrows(O, D, shooter, made ? 1 : three ? 3 : 2);
+        if (res === 'end') {
+          autoSubs(O);
+          autoSubs(D);
+          return false;
+        }
+        shotClock = 14;
+        continue;
+      }
+      if (made) {
+        autoSubs(O);
+        autoSubs(D);
+        return false;
+      }
+      if (clock <= 0) return false;
+      const orebBy = rebound(O, D, T.oreb, blocked);
+      if (orebBy) {
+        shotClock = 14;
+        if (rng.chance(T.putback)) putbackBy = orebBy;
+        continue;
+      }
+      return true;
+    }
+    return false;
+  };
+
+  const jumpWinner: 0 | 1 = rng.chance(0.5) ? 0 : 1;
+  let ot = 0;
+  while (true) {
+    clock = period <= 4 ? 600 : 300;
+    for (const s of sides) {
+      s.teamFouls = 0;
+      const rest = period === 3 ? 0.35 : 0.18;
+      for (const l of s.all) l.energy = Math.min(1, l.energy + rest);
+      if (period > 1) autoSubs(s);
+    }
+    ev(EV.START, 0);
+    let o: 0 | 1 = period === 1 || period === 3 ? jumpWinner : period <= 4 ? ((1 - jumpWinner) as 0 | 1) : rng.chance(0.5) ? 0 : 1;
+    let live = false;
+    while (clock > 0) {
+      live = possession(o, live);
+      o = (1 - o) as 0 | 1;
+    }
+    ev(EV.END, 0);
+    if (period >= 4 && score[0] !== score[1]) break;
+    if (period >= 4) ot += 1;
+    period += 1;
+    if (period > 20) break; // salvaguarda
+  }
+
+  const box = new Map<number, number[]>();
+  const side = new Map<number, 0 | 1>();
+  for (const s of sides) {
+    for (const l of s.all) {
+      const b = Array.from(l.box);
+      b[F.sec] = Math.round(b[F.sec]!);
+      box.set(l.p.id, b);
+      side.set(l.p.id, s.idx);
+    }
+    // Los segundos redondeados deben sumar exactamente 5 × duración del partido.
+    const total = (2400 + ot * 300) * 5;
+    const rows = s.all.map((l) => box.get(l.p.id)!);
+    const diff = total - rows.reduce((a, b) => a + b[F.sec]!, 0);
+    if (diff !== 0) rows.reduce((a, b) => (b[F.sec]! > a[F.sec]! ? b : a))[F.sec]! += diff;
+  }
+  return { score, ot, poss, box, side, starters, shots, pbp };
+}
