@@ -13,6 +13,7 @@ import { Rng, mixSeed } from './rng';
 import { type Db, bumpRevision, transaction } from './schema';
 import { getUniverse, insertPlayer, freeNumber } from './season';
 import { cupoAllowsIn, cupoAllowsOut } from './world';
+import { clubDecision, defaultClause, patience, playerDecision, preferredYears, requiredSalary, sellerWants, windowState } from './transfers';
 
 export const ROSTER_MAX = 16;
 export const ROSTER_MIN = 10;
@@ -45,7 +46,7 @@ function rosterSize(db: Db, clubId: number): number {
   return Number(db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [clubId])[0]!.n);
 }
 
-function econOf(db: Db, playerId: number) {
+export function econOf(db: Db, playerId: number) {
   const u = getUniverse(db)!;
   const r = db.rows<{ id: number; name: string; club_id: number | null; birth_year: number; potential_est: number; morale: number; ovr: number; salary: number | null; until: number | null; retired: number; injury_games: number; nationality: string; youth: number }>(
     `SELECT p.id, p.name, p.club_id, p.birth_year, p.potential_est, p.morale, p.retired, p.injury_games, p.nationality, p.youth, a.ovr, c.salary, c.until
@@ -87,7 +88,7 @@ export function ensureEconomy(db: Db): void {
   const touched = new Set(rows.map((r) => r.club_id));
   for (const r of rows) {
     const ask = askSalary({ ovr: r.ovr, age: u.game_season - r.birth_year, potential_est: r.potential_est, morale: r.morale });
-    db.exec('INSERT INTO contract VALUES (?,?,?,?)', [r.id, r.club_id, round(ask * (0.85 + rng.next() * 0.3), 5_000), u.game_season + rng.int(0, 3)]);
+    db.exec('INSERT INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [r.id, r.club_id, round(ask * (0.85 + rng.next() * 0.3), 5_000), u.game_season + rng.int(0, 3)]);
   }
   // Presupuesto: lo que ya paga más un margen; caja: entre un 40 % y un 70 % del presupuesto.
   // Solo los clubes que no tenían contratos (en una partida antigua, los clubes europeos recién añadidos).
@@ -99,6 +100,17 @@ export function ensureEconomy(db: Db): void {
   }
   // Un mercado de agentes libres con el que empezar.
   if (db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id IS NULL AND retired = 0 AND youth = 0')[0]!.n < 10) addFreeAgents(db, rng, 30);
+  assignClauses(db);
+}
+
+/** Cláusulas de rescisión para los contratos de la IA que no tienen (entre 2,4 y 4 veces su valor). */
+export function assignClauses(db: Db) {
+  const u = getUniverse(db);
+  if (!u) return;
+  const rng = new Rng(mixSeed(u.seed, u.game_season * 71 + 9));
+  for (const c of db.rows<{ player_id: number }>('SELECT player_id FROM contract WHERE clause IS NULL AND club_id IS NOT ?', [u.user_club_id])) {
+    db.exec('UPDATE contract SET clause = ? WHERE player_id = ?', [defaultClause(econOf(db, c.player_id).value, rng), c.player_id]);
+  }
 }
 
 /** Agentes libres generados: veteranos, jugadores de rotación y jóvenes. */
@@ -113,13 +125,13 @@ export function addFreeAgents(db: Db, rng: Rng, n: number, seasonArg?: number) {
   }
 }
 
-export type MarketResult = { ok: true; message: string } | { ok: false; message: string };
+export type MarketResult = { ok: boolean; message: string; counter?: number; patience?: number };
 function blockedWindow(phase: string): string | null {
   return phase === 'playoffs' ? 'El mercado está cerrado durante los playoffs.' : null;
 }
 
 /** Fichar a un agente libre. */
-export function signFreeAgent(db: Db, clubId: number, playerId: number, salary: number, years: number): MarketResult {
+export function signFreeAgent(db: Db, clubId: number, playerId: number, salary: number, years: number, clause: number | null = null): MarketResult {
   const e = econOf(db, playerId);
   const closed = blockedWindow(e.phase);
   if (closed) return { ok: false, message: closed };
@@ -127,16 +139,17 @@ export function signFreeAgent(db: Db, clubId: number, playerId: number, salary: 
   const cupoIn = cupoAllowsIn(db, clubId, e.nationality);
   if (cupoIn) return { ok: false, message: cupoIn };
   if (rosterSize(db, clubId) >= ROSTER_MAX) return { ok: false, message: `Tu plantilla ya tiene ${ROSTER_MAX} jugadores.` };
-  if (salary < e.ask * 0.95) return { ok: false, message: `${e.name} pide al menos ${eur(e.ask)} por temporada.` };
   const budget = db.rows<{ budget: number }>('SELECT budget FROM club WHERE id = ?', [clubId])[0]!.budget;
   if (payroll(db, clubId) + salary > budget) return { ok: false, message: `No cabe en tu presupuesto salarial: te quedan ${eur(Math.max(0, budget - payroll(db, clubId)))}.` };
   years = Math.max(1, Math.min(4, Math.round(years)));
+  const say = playerDecision(db, playerId, clubId, { salary, years, clause });
+  if (!say.ok) return say;
   const until = e.season + years - 1 + (e.phase === 'fin' ? 1 : 0);
   transaction(db, () => {
     db.exec('UPDATE player SET club_id = ?, morale = MAX(morale, 70) WHERE id = ?', [clubId, playerId]);
     const nums = new Set(db.rows<{ number: number }>('SELECT number FROM player WHERE club_id = ? AND number IS NOT NULL', [clubId]).map((x) => x.number));
     db.exec('UPDATE player SET number = ? WHERE id = ?', [freeNumber(new Rng(playerId), nums), playerId]);
-    db.exec('INSERT OR REPLACE INTO contract VALUES (?,?,?,?)', [playerId, clubId, salary, until]);
+    db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until, clause) VALUES (?,?,?,?,?)', [playerId, clubId, salary, until, clause]);
     logTransfer(db, playerId, null, clubId, 0, salary, until, 'libre');
     addNews(db, 'fichaje', `${clubName(db, clubId)} ficha a ${e.name} (agente libre) hasta ${until + 1}: ${eur(salary)} por temporada.`, clubId, playerId);
     bumpRevision(db);
@@ -145,11 +158,11 @@ export function signFreeAgent(db: Db, clubId: number, playerId: number, salary: 
 }
 
 /** Comprar a un jugador de otro club: el club decide por el traspaso y el jugador por el sueldo. */
-export function buyPlayer(db: Db, buyer: number, playerId: number, fee: number, salary: number, years: number): MarketResult {
+export function buyPlayer(db: Db, buyer: number, playerId: number, fee: number, salary: number, years: number, clause: number | null = null): MarketResult {
   const e = econOf(db, playerId);
-  const closed = blockedWindow(e.phase);
-  if (closed) return { ok: false, message: closed };
-  if (e.club_id === null) return signFreeAgent(db, buyer, playerId, salary, years);
+  if (e.club_id === null) return signFreeAgent(db, buyer, playerId, salary, years, clause);
+  const w = windowState(db);
+  if (!w.open) return { ok: false, message: `${w.label}. Los agentes libres sí se pueden fichar.` };
   if (e.club_id === buyer) return { ok: false, message: 'Ya es tu jugador.' };
   const seller = e.club_id;
   if (rosterSize(db, buyer) >= ROSTER_MAX) return { ok: false, message: `Tu plantilla ya tiene ${ROSTER_MAX} jugadores.` };
@@ -159,16 +172,13 @@ export function buyPlayer(db: Db, buyer: number, playerId: number, fee: number, 
   if (cupoAllowsOut(db, seller, e.nationality)) return { ok: false, message: `${clubName(db, seller)} no vende: se quedaría sin el mínimo de nacionales.` };
   const cash = db.rows<{ cash: number; budget: number }>('SELECT cash, budget FROM club WHERE id = ?', [buyer])[0]!;
   if (fee > cash.cash) return { ok: false, message: `No tienes caja suficiente: dispones de ${eur(cash.cash)}.` };
-  // ¿Es pieza clave? Entre los 3 mejores de su club, piden un 30 % más.
-  const rank = db.rows<{ id: number }>(
-    'SELECT p.id FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ? WHERE p.club_id = ? AND p.retired = 0 ORDER BY a.ovr DESC',
-    [e.season, seller],
-  ).findIndex((x) => x.id === playerId);
-  const wanted = Math.round(e.value * (rank < 3 ? 1.3 : 1));
-  if (fee < wanted) return { ok: false, message: `${clubName(db, seller)} rechaza la oferta. Para negociar, la cifra tendría que acercarse a ${eur(wanted)}.` };
-  if (salary < e.ask * 0.95) return { ok: false, message: `El club acepta, pero ${e.name} pide al menos ${eur(e.ask)} por temporada.` };
   if (payroll(db, buyer) + salary > cash.budget) return { ok: false, message: `El sueldo no cabe en tu presupuesto: te quedan ${eur(Math.max(0, cash.budget - payroll(db, buyer)))}.` };
   years = Math.max(1, Math.min(4, Math.round(years)));
+  // Primero el club (traspaso o cláusula), después el jugador (contrato).
+  const club = clubDecision(db, playerId, buyer, fee);
+  if (!club.ok) return club;
+  const say = playerDecision(db, playerId, buyer, { salary, years, clause });
+  if (!say.ok) return { ...say, message: `El club acepta ${eur(fee)}, pero falta el jugador. ${say.message}` };
   const until = e.season + years - 1 + (e.phase === 'fin' ? 1 : 0);
   transaction(db, () => {
     db.exec('UPDATE club SET cash = cash - ? WHERE id = ?', [fee, buyer]);
@@ -179,8 +189,9 @@ export function buyPlayer(db: Db, buyer: number, playerId: number, fee: number, 
     if (nums.has(Number(db.rows<{ number: number }>('SELECT number FROM player WHERE id = ?', [playerId])[0]!.number))) {
       db.exec('UPDATE player SET number = ? WHERE id = ?', [freeNumber(new Rng(playerId), nums), playerId]);
     }
-    db.exec('INSERT OR REPLACE INTO contract VALUES (?,?,?,?)', [playerId, buyer, salary, until]);
-    logTransfer(db, playerId, seller, buyer, fee, salary, until, 'traspaso');
+    db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until, clause) VALUES (?,?,?,?,?)', [playerId, buyer, salary, until, clause]);
+    db.exec('DELETE FROM player_tendency WHERE player_id = ?', [playerId]);
+    logTransfer(db, playerId, seller, buyer, fee, salary, until, club.byClause ? 'clausula' : 'traspaso');
     addNews(db, 'fichaje', `${clubName(db, buyer)} compra a ${e.name} a ${clubName(db, seller)} por ${eur(fee)}.`, buyer, playerId);
     bumpRevision(db);
   });
@@ -214,8 +225,8 @@ export function offersFor(db: Db, playerId: number): { club_id: number; club: st
 
 export function sellPlayer(db: Db, playerId: number, toClub: number): MarketResult {
   const e = econOf(db, playerId);
-  const closed = blockedWindow(e.phase);
-  if (closed) return { ok: false, message: closed };
+  const w = windowState(db);
+  if (!w.open) return { ok: false, message: w.label };
   const offer = offersFor(db, playerId).find((o) => o.club_id === toClub);
   if (!offer) return { ok: false, message: 'Esa oferta ya no está disponible.' };
   if (rosterSize(db, e.club_id!) <= ROSTER_MIN) return { ok: false, message: `No puedes quedarte con menos de ${ROSTER_MIN} jugadores.` };
@@ -261,18 +272,18 @@ export function releasePlayer(db: Db, playerId: number): MarketResult {
 }
 
 /** Renovar: solo en el último año de contrato. Si está descontento, pide más. */
-export function renewPlayer(db: Db, playerId: number, salary: number, years: number): MarketResult {
+export function renewPlayer(db: Db, playerId: number, salary: number, years: number, clause: number | null = null): MarketResult {
   const e = econOf(db, playerId);
   if (e.club_id === null || e.until === null) return { ok: false, message: 'No tiene contrato.' };
   if (e.yearsLeft > 0) return { ok: false, message: 'Solo se renueva en el último año de contrato.' };
-  const need = e.econ.morale < 40 ? e.ask * 1.15 : e.ask * 0.95;
-  if (salary < need) return { ok: false, message: `${e.name} pide al menos ${eur(need)} por temporada${e.econ.morale < 40 ? ' (está descontento)' : ''}.` };
   const budget = db.rows<{ budget: number }>('SELECT budget FROM club WHERE id = ?', [e.club_id])[0]!.budget;
   if (payroll(db, e.club_id) - (e.salary ?? 0) + salary > budget * 1.02) return { ok: false, message: 'Ese sueldo no cabe en tu presupuesto salarial.' };
   years = Math.max(1, Math.min(4, Math.round(years)));
+  const say = playerDecision(db, playerId, e.club_id, { salary, years, clause }, true);
+  if (!say.ok) return say;
   const until = e.until + years;
   transaction(db, () => {
-    db.exec('UPDATE contract SET salary = ?, until = ? WHERE player_id = ?', [salary, until, playerId]);
+    db.exec('UPDATE contract SET salary = ?, until = ?, clause = ? WHERE player_id = ?', [salary, until, clause, playerId]);
     db.exec('UPDATE player SET morale = MIN(100, morale + 8) WHERE id = ?', [playerId]);
     logTransfer(db, playerId, e.club_id, e.club_id, 0, salary, until, 'renovacion');
     addNews(db, 'renovacion', `${e.name} renueva con ${clubName(db, e.club_id)} hasta ${until}-${String((until + 1) % 100).padStart(2, '0')}.`, e.club_id, playerId);
@@ -287,6 +298,15 @@ export function marketInfo(db: Db, playerId: number) {
     club_id: e.club_id, youth: e.youth, nationality: e.nationality, salary: e.salary, until: e.until, ask: e.ask, value: e.value, yearsLeft: e.yearsLeft,
     releaseCost: e.club_id ? releaseCost(db, playerId) : 0, morale: e.econ.morale, injury_games: e.injury_games,
     canRenew: e.club_id !== null && e.yearsLeft <= 0, marketOpen: blockedWindow(e.phase) === null, phase: e.phase,
+    window: windowState(db),
+    clause: db.rows<{ clause: number | null }>('SELECT clause FROM contract WHERE player_id = ?', [playerId])[0]?.clause ?? null,
+    age: e.econ.age,
+    preferredYears: preferredYears(e.econ.age),
+    patience: e.userClub ? patience(db, playerId, e.userClub) : 100,
+    clubPatience: e.userClub ? patience(db, playerId, -e.userClub) : 100,
+    need: e.userClub && e.club_id !== e.userClub ? requiredSalary(db, playerId, e.userClub, preferredYears(e.econ.age), null) : e.userClub && e.club_id === e.userClub ? requiredSalary(db, playerId, e.userClub, preferredYears(e.econ.age), null, true) : e.ask,
+    sellerWants: e.club_id !== null && e.club_id !== e.userClub ? sellerWants(db, playerId).wanted : null,
+    offers: db.rows<{ id: number; club: string; fee: number; expires_day: number }>("SELECT o.id, c.name AS club, o.fee, o.expires_day FROM market_offer o JOIN club c ON c.id = o.from_club WHERE o.player_id = ? AND o.status = 'pendiente'", [playerId]),
   };
 }
 
@@ -397,7 +417,7 @@ export function offseason(db: Db, oldSeason: number, newSeason: number, userClub
       db.exec('UPDATE player SET club_id = ? WHERE id = ?', [c.id, fa.id]);
       const nums = new Set(db.rows<{ number: number }>('SELECT number FROM player WHERE club_id = ? AND number IS NOT NULL', [c.id]).map((x) => x.number));
       db.exec('UPDATE player SET number = ? WHERE id = ?', [freeNumber(rng, nums), fa.id]);
-      db.exec('INSERT OR REPLACE INTO contract VALUES (?,?,?,?)', [fa.id, c.id, ask, until]);
+      db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [fa.id, c.id, ask, until]);
       db.exec('INSERT INTO transfer (season, day, player_id, from_club, to_club, fee, salary, until, kind) VALUES (?,?,?,?,?,?,?,?,?)', [newSeason, 0, fa.id, null, c.id, 0, ask, until, 'libre']);
       if (fa.ovr >= 62) db.exec('INSERT INTO news (season, day, club_id, player_id, kind, text) VALUES (?,?,?,?,?,?)', [newSeason, 0, c.id, fa.id, 'fichaje', `${c.name} ficha a ${fa.name} (agente libre).`]);
       n++;
@@ -409,5 +429,5 @@ export function offseason(db: Db, oldSeason: number, newSeason: number, userClub
 
 /** Contrato mínimo para los jóvenes de cantera y los fichajes de relleno. */
 export function rookieContract(db: Db, playerId: number, clubId: number, season: number) {
-  db.exec('INSERT OR REPLACE INTO contract VALUES (?,?,?,?)', [playerId, clubId, 40_000, season + 2]);
+  db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [playerId, clubId, 40_000, season + 2]);
 }

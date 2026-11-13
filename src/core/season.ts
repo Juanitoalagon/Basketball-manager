@@ -4,11 +4,12 @@
  */
 import { deflateSync, strToU8 } from 'fflate';
 import { ATTR_KEYS, type Attrs, type NewPlayer, type Pos, developAttrs, overall, makePotential } from './attributes';
-import { BOX_FIELDS, type EngineTeam, type Intervention, type Level, type Role, type Tactics, simulateGame } from './engine';
+import { BOX_FIELDS, type EngineTeam, type Intervention, type Level, type Role, type Tactics, type TendKey, simulateGame } from './engine';
 import { ROSTER_SIZE, TIER_QUALITY, generateProspect, generateRoster } from './generate';
 import { REAL_CLUBS } from './names';
-import { addNews, ensureEconomy, offseason, rookieContract } from './market';
-import { INTENSITY, afterDay, fixRosterCupos, getTraining, scheduleEurope, setupWorld, trainingBonus, youthOffseason } from './world';
+import { computeAwards } from './awards';
+import { addFreeAgents, addNews, assignClauses, ensureEconomy, offseason, rookieContract } from './market';
+import { INTENSITY, aiFillNeeds, positionNeeds, afterDay, fixRosterCupos, getTraining, scheduleEurope, setupWorld, trainingBonus, youthOffseason } from './world';
 import { Rng, mixSeed } from './rng';
 import { type Db, ENGINE_VERSION, GAME_TABLES, bumpRevision, transaction } from './schema';
 
@@ -171,6 +172,12 @@ function loadTeam(db: Db, clubId: number, season: number): EngineTeam {
   const mine = lu.filter((l) => ids.has(l.player_id));
   const starters: (number | null)[] = [null, null, null, null, null];
   for (const l of mine) if (l.slot !== null && l.slot >= 0 && l.slot < 5) starters[l.slot] = l.player_id;
+  // Tendencias ajustadas por el entrenador.
+  const tend = new Map<number, Partial<Record<TendKey, number>>>();
+  for (const t of db.rows<{ player_id: number; key: TendKey; value: number }>(
+    'SELECT t.player_id, t.key, t.value FROM player_tendency t JOIN player p ON p.id = t.player_id WHERE p.club_id = ?',
+    [clubId],
+  )) (tend.get(t.player_id) ?? tend.set(t.player_id, {}).get(t.player_id)!)[t.key] = t.value;
   return {
     clubId,
     lineup: mine.length ? { starters, roles: Object.fromEntries(mine.map((l) => [l.player_id, l.role])), shoot: Object.fromEntries(mine.map((l) => [l.player_id, l.shoot])) } : undefined,
@@ -182,6 +189,7 @@ function loadTeam(db: Db, clubId: number, season: number): EngineTeam {
       height_cm: Number(r.height_cm),
       morale: Number(r.morale),
       attrs: Object.fromEntries(ATTR_KEYS.map((k) => [k, Number(r[k])])) as Attrs,
+      tend: tend.get(Number(r.id)),
     })),
   };
 }
@@ -274,6 +282,7 @@ export function advanceDay(db: Db, opts: { interventions?: Intervention[]; liveG
       if (res.finished) {
         db.exec("UPDATE universe SET phase = 'fin'");
         db.exec("UPDATE season SET status = 'cerrada' WHERE year = ?", [season]);
+        events.push(...computeAwards(db, season));
         seasonOver = true;
       }
     }
@@ -554,17 +563,23 @@ export function startNewSeason(db: Db): { season: number; retired: number; prosp
       const nums = new Set(db.rows<{ number: number }>('SELECT number FROM player WHERE club_id = ? AND retired = 0', [c.id]).map((x) => x.number));
       let n = db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [c.id])[0]!.n;
       while (n < ROSTER_SIZE) {
-        const pid = insertPlayer(db, generateProspect(rng, { tier: c.competition_id, season, used }), c.id, freeNumber(rng, nums), season);
+        const need = positionNeeds(db, c.id)[0];
+        const pid = insertPlayer(db, generateProspect(rng, { tier: c.competition_id ?? 1, season, used, pos: need }), c.id, freeNumber(rng, nums), season);
         rookieContract(db, pid, c.id, season);
         n++;
         prospects++;
       }
     }
     youthOffseason(db, season, u.user_club_id, rng, events);
+    aiFillNeeds(db, season, u.user_club_id, rng, events);
+    // Que siempre quede un mercado de agentes libres con el que trabajar.
+    const left = db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id IS NULL AND retired = 0 AND youth = 0')[0]!.n;
+    if (left < 35) addFreeAgents(db, rng, 35 - left, season);
     scheduleSeason(db, season, u.seed);
     setupWorld(db);
     scheduleEurope(db, season, u.seed);
     db.exec("UPDATE universe SET game_season = ?, game_day = 0, phase = 'regular'", [season]);
+    assignClauses(db);
     bumpRevision(db);
     events.push(`${retired} jugadores se retiran y ${prospects} jóvenes suben de las canteras.`);
     return { season, retired, prospects, events };

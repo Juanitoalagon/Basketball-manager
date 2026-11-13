@@ -1,4 +1,4 @@
-# Fórmulas y decisiones del motor (v0.5)
+# Fórmulas y decisiones del motor (v0.6)
 
 Todo lo que aparece en las pantallas sale de aquí. Las mismas fórmulas valen para datos reales y simulados.
 
@@ -197,3 +197,44 @@ Un «día» del calendario es una semana.
 - Generadas con facesjs (Apache-2.0) usando como semilla el id del jugador: siempre la misma cara y no ocupa sitio en la partida.
 - Tono de piel orientado por la nacionalidad; a partir de 31 años, canas progresivas y algunas entradas; los menores de 22, menos barba. La camiseta lleva los colores del club.
 - Los jugadores reales importados no llevan cara inventada: se muestra su dorsal.
+
+## Arquetipos (v0.6)
+Cada arquetipo mira unos atributos clave; su nota es la media de esos atributos (algunos cuentan doble) y se queda el que más supera su umbral. Se muestran el principal y, si lo hay, un segundo.
+- Anotador (creación, tiro de 2, penetración, finalización, tiro de 3) ≥ 63 · Tirador (tiro de 3 ×2, sin balón, libres) ≥ 66 · 3&D (tiro de 3 y defensa exterior ≥ 63) ≥ 65 · Director (pase, visión, manejo, IQ) ≥ 66 · Penetrador (penetración, finalización, velocidad, agilidad) ≥ 66 · Defensor (defensa exterior, robo, anticipación, agilidad, bloqueos) ≥ 65 · Protector del aro (tapón, intimidación, defensa interior, salto; 2,02 m o más, +0,4 por cm sobre 2,06) ≥ 66 · Reboteador ≥ 64 · Poste bajo (SF/PF/C) ≥ 66 · Pívot abierto (PF/C con tiro) ≥ 57 · Todoterreno ≥ 60 sin ningún punto débil (defensa, tiro y pase ≥ 52).
+- Si no llega a ningún umbral: «Jugador de rol».
+
+## Tendencias de jugador (v0.6)
+Diez tendencias de 1 a 99: toques, tiro de 3, media distancia, penetración, poste, pase, esfuerzo defensivo, robos, tapones y rebote ofensivo.
+- **Natural** = 50 + (nota del motor − centro) × escala, con la misma nota que usa el motor para esa acción (centro 55 y escala 1,6 en toques; centro 50 y escala 1,2 en el resto). Quien tira bien de tres tiene tendencia alta a tirar de tres.
+- **Ajuste**: el motor suma (ajustada − natural) / escala a la nota que decide **cuánto** se hace cada cosa, no **lo bien** que se hace. Sin ajuste, el partido es idéntico al de antes.
+- Toques: peso para ser quien acaba la posesión, e^(0,075·(uso − 55)). Tipos de tiro: e^(0,055·(nota − 50)) por tipo.
+- Forzar cuesta: cada unidad de log(multiplicador) por encima de lo natural resta 0,18 en logit al acierto (y restringir lo sube).
+- Esfuerzo defensivo: +defensa exterior e interior, y gasto de energía × (1 + ajuste/150) y algo más de faltas. Robos: más robos y pérdidas rivales, más faltas. Tapones: más tapones, más faltas en el tiro. Rebote ofensivo: más rebotes ofensivos, el rival sale más a la contra.
+
+## Defensa de equipo (v0.6)
+- Intensidad: conservadora (pérdidas rivales −0,22 logit, faltas ×0,85, cansancio ×0,93, acierto rival −0,03) · normal · presión (pérdidas +0,28, faltas ×1,25, cansancio ×1,12, acierto rival +0,05 cuando supera la presión).
+- Prioridad: cerrar la pintura (el rival busca aro ×0,82, pintura ×0,85 y triple ×1,12; acierta −0,15 dentro y +0,08 de tres) o salir a tiradores (al revés: aro ×1,12, triple ×0,85; −0,12 de tres y +0,1 dentro).
+- Marcaje especial (solo en directo): el elegido recibe un 40 % menos de balones y tira con −0,22 logit; el resto del rival, +0,04.
+
+## Mercado (v0.6)
+- **Mercado de traspasos**: abierto en verano y durante la liga regular hasta jugar la jornada 31, como en la ACB, donde se puede fichar hasta poco antes de los playoffs. Después, cerrado hasta el verano. Los agentes libres se pueden fichar siempre, salvo en playoffs. Ofertas de la IA por tus jugadores: 45 % de probabilidad diaria en verano y 16 % durante la temporada. La paciencia de las negociaciones se renueva tras la jornada 17.
+- **Lo que pide un jugador para firmar contigo** = pide · moral · cláusula / (atractivo del club · encaje de años).
+  - Atractivo = 1 + (reputación − 70)/200, + 0,06 si juegas EuroLeague, + 0,03 EuroCup, + 0,02 BCL.
+  - Encaje de años = 1 − 0,05 × |años ofrecidos − preferidos|; prefiere 4 años con menos de 24, 3 hasta los 28, 2 hasta los 32 y 1 después.
+  - Moral menor de 40: pide un 12 % más. Cláusula baja (menos de 1,5 veces su valor): pide un 4 % menos; muy alta (más de 4 veces): un 6 % más.
+- **Paciencia**: empieza en 100 %. Cada oferta rechazada resta 20 (si te quedas a menos del 10 %), 30 (del 10 al 25 %) o 45 (más del 25 %). A 0, no vuelve a negociar contigo esa temporada. El club vendedor tiene su propia paciencia.
+- **Club vendedor**: quiere su valor (× 1,3 si es de sus 3 mejores, × 1,05 si le quedan 2 o más años). Si pagas la cláusula, no puede negarse.
+- **Cláusulas**: los contratos de la IA llevan una de 2,4 a 4 veces el valor del jugador. En los tuyos la eliges tú.
+- **Ofertas que recibes**: en ventana, los clubes con dinero y sitio pujan por jugadores tuyos que entrarían en su rotación (80-115 % de su valor) y caducan en 3 días. Puedes aceptar, rechazar o pedir más una vez. Si tu jugador tiene una cláusula baja (≤ 2,2 veces su valor) y un club puede pagarla, a veces la pagan sin preguntar.
+- **Intercambios**: el otro club valora a cada jugador que le das por su valor completo si entraría entre sus 8 mejores y por el 60 % si no; suma el dinero y lo compara con lo que pide por el suyo (+5 %).
+- La IA también se traspasa jugadores entre sí y cubre en verano los puestos donde tiene menos de dos jugadores.
+
+## Premios (v0.6)
+Liga ACB y Primera FEB, fase regular, mínimo la mitad de los partidos y de los minutos posibles.
+- MVP: VA + 0,12 × valoración por partido + 0,05 × victorias del equipo. Quinteto ideal: los mejores de esa puntuación en 2 exteriores (PG/SG), 2 aleros o ala-pívots y 1 pívot.
+- Mejor joven (≤ 22 años) y sexto hombre (titular en menos de la mitad de sus partidos): por VA. Mejor defensor: DWS + 0,8 × (robos + tapones por partido) + 0,15 × rebotes defensivos por partido. Más mejorado: subida de media respecto al año anterior (+ 0,1 × VA para desempatar).
+- MVP de la final: el jugador del campeón con más valoración sumada en la serie final (ACB) o en el partido final (Copa y Europa).
+
+## Ojeo y canteras ajenas (v0.6)
+- Ojear cuesta 25 mil €: el potencial estimado pasa a tener un error de ±2 como mucho (o menos con buenos ojeadores) y el jugador entra en tu seguimiento.
+- En verano puedes llevarte a un juvenil de otra cantera pagando una compensación por formación = 40 mil € + 12 mil € por cada punto de potencial estimado por encima de 55 (máximo 8 juveniles en tu cantera).

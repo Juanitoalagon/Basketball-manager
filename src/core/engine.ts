@@ -78,7 +78,45 @@ export interface EnginePlayer {
   attrs: Attrs;
   /** 0-100; con 65 no influye. */
   morale?: number;
+  /** Tendencias ajustadas por el entrenador (escala 1-99). Las que faltan, las naturales. */
+  tend?: Partial<Record<TendKey, number>>;
 }
+
+/**
+ * Tendencias de jugador (1-99): con qué frecuencia busca cada cosa. Las naturales salen de sus
+ * atributos (un gran tirador tiende a tirar de tres; un buen taponador, a intentar tapones).
+ * Escala: tendencia = 50 + (valor del motor − centro) · pendiente. Ajustarla desplaza el valor
+ * del motor en (ajustada − natural) / pendiente. Sin ajustes, el partido es exactamente el mismo.
+ */
+export const TEND_KEYS = ['uso', 'tres', 'media', 'aro', 'poste', 'pase', 'defensa', 'robo', 'tapon', 'rebote'] as const;
+export type TendKey = (typeof TEND_KEYS)[number];
+export const TEND_INFO: Record<TendKey, { label: string; hint: string; c: number; m: number }> = {
+  uso: { label: 'Toques (uso)', hint: 'Cuántas posesiones acaban en sus manos', c: 55, m: 1.6 },
+  tres: { label: 'Tiro de tres', hint: 'Cuánto busca el triple cuando tira', c: 50, m: 1.2 },
+  media: { label: 'Media distancia', hint: 'Cuánto busca el tiro de media', c: 50, m: 1.2 },
+  aro: { label: 'Penetración', hint: 'Cuánto ataca el aro', c: 50, m: 1.2 },
+  poste: { label: 'Juego al poste', hint: 'Cuánto juega de espaldas en la pintura', c: 50, m: 1.2 },
+  pase: { label: 'Pase', hint: 'Cuánto busca al compañero (más asistencias)', c: 50, m: 1.2 },
+  defensa: { label: 'Esfuerzo defensivo', hint: 'Defiende más fuerte: mejor defensa, más cansancio y faltas', c: 50, m: 1.2 },
+  robo: { label: 'Buscar robos', hint: 'Más robos y pérdidas rivales, pero más faltas', c: 50, m: 1.2 },
+  tapon: { label: 'Intentar tapones', hint: 'Más tapones, pero más faltas en el tiro', c: 50, m: 1.2 },
+  rebote: { label: 'Ir al rebote ofensivo', hint: 'Más rebotes ofensivos, pero el rival corre más', c: 50, m: 1.2 },
+};
+const tendRaw = (r: R): Record<TendKey, number> => ({
+  uso: r.usage, tres: r.three, media: r.mid, aro: r.rim, poste: r.post, pase: r.pass,
+  defensa: (r.perD + r.intD) / 2, robo: r.steal, tapon: r.rimProt, rebote: r.oreb,
+});
+export function naturalTendencies(a: Attrs, heightCm: number): Record<TendKey, number> {
+  const raw = tendRaw(ratings(a, heightCm, 0));
+  const out = {} as Record<TendKey, number>;
+  for (const k of TEND_KEYS) out[k] = Math.max(1, Math.min(99, Math.round(50 + (raw[k] - TEND_INFO[k].c) * TEND_INFO[k].m)));
+  return out;
+}
+
+/** Defensa de equipo: presión, a qué se cierra y marcaje especial a un rival. */
+export type DefFocus = 'equilibrada' | 'pintura' | 'perimetro';
+export interface Defense { pressure: Level; focus: DefFocus; mark: number | null }
+export const DEFAULT_DEFENSE: Defense = { pressure: 'normal', focus: 'equilibrada', mark: null };
 export type Role = 'rot' | 'poco' | 'fuera';
 export type Level = 'menos' | 'normal' | 'mas';
 /** Multiplicadores de las órdenes del entrenador. */
@@ -86,8 +124,10 @@ export const LEVEL_MULT: Record<Level, number> = { menos: 0.55, normal: 1, mas: 
 export interface Tactics {
   /** Plan de tiro del equipo: cuánto buscar cada tipo de tiro. */
   shot: Record<ShotKind, Level>;
+  /** Defensa del equipo. */
+  defense?: Defense;
 }
-export const DEFAULT_TACTICS: Tactics = { shot: { rim: 'normal', paint: 'normal', mid: 'normal', three: 'normal' } };
+export const DEFAULT_TACTICS: Tactics = { shot: { rim: 'normal', paint: 'normal', mid: 'normal', three: 'normal' }, defense: { pressure: 'normal', focus: 'equilibrada', mark: null } };
 export interface EngineTeam {
   clubId: number;
   players: EnginePlayer[];
@@ -114,7 +154,8 @@ export type Intervention =
   | { at: number; side: 0 | 1; kind: 'sub'; in: number; out: number }
   | { at: number; side: 0 | 1; kind: 'timeout' }
   | { at: number; side: 0 | 1; kind: 'plan'; shot: Tactics['shot'] }
-  | { at: number; side: 0 | 1; kind: 'auto'; on: boolean };
+  | { at: number; side: 0 | 1; kind: 'auto'; on: boolean }
+  | { at: number; side: 0 | 1; kind: 'defense'; defense: Defense };
 
 /** Foto del partido al empezar cada posesión (solo en directo). */
 export interface Snapshot {
@@ -149,6 +190,8 @@ interface R {
 interface Live {
   p: EnginePlayer;
   r: R;
+  /** Desplazamiento de cada tendencia respecto a la natural, en unidades del motor (0 sin ajustes). */
+  d: Record<TendKey, number>;
   kindW: Record<ShotKind, number>;
   usageMult: number;
   energy: number;
@@ -221,11 +264,16 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
       const form = (rng.next() + rng.next() + rng.next() - 1.5) * T.formSd * 1.4 * (1 - p.attrs.cons / 150) + ((p.morale ?? 65) - 65) / 35 * T.moraleEffect;
       const r = ratings(p.attrs, p.height_cm, form);
       const ex = (x: number) => Math.exp(T.kindK * (x - 50));
+      const d = { uso: 0, tres: 0, media: 0, aro: 0, poste: 0, pase: 0, defensa: 0, robo: 0, tapon: 0, rebote: 0 } as Record<TendKey, number>;
+      if (p.tend) {
+        const nat = naturalTendencies(p.attrs, p.height_cm);
+        for (const k of TEND_KEYS) if (p.tend[k] !== undefined) d[k] = (p.tend[k]! - nat[k]) / TEND_INFO[k].m;
+      }
       return {
-        p, r, energy: 1, fouls: 0, onCourt: false,
+        p, r, d, energy: 1, fouls: 0, onCourt: false,
         box: new Array(BOX_FIELDS.length).fill(0),
         // Sin el plan del entrenador: el plan se aplica al elegir el tiro y puede cambiar en directo.
-        kindW: { rim: T.kind.rim * ex(r.rim), paint: T.kind.paint * ex(r.post), mid: T.kind.mid * ex(r.mid), three: T.kind.three * ex(r.three) },
+        kindW: { rim: T.kind.rim * ex(r.rim + d.aro), paint: T.kind.paint * ex(r.post + d.poste), mid: T.kind.mid * ex(r.mid + d.media), three: T.kind.three * ex(r.three + d.tres) },
         usageMult: LEVEL_MULT[t.lineup?.shoot?.[p.id] ?? 'normal'],
       };
     });
@@ -234,6 +282,18 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
   const sides: [Side, Side] = [mkSide(home, 0), mkSide(away, 1)];
   const plans: Tactics['shot'][] = [{ ...(home.tactics?.shot ?? DEFAULT_TACTICS.shot) }, { ...(away.tactics?.shot ?? DEFAULT_TACTICS.shot) }];
   const autoOn = [true, true];
+  const defs: Defense[] = [{ ...DEFAULT_DEFENSE, ...home.tactics?.defense }, { ...DEFAULT_DEFENSE, ...away.tactics?.defense }];
+  const PRESS = { menos: { tov: -0.22, foul: 0.85, drain: 0.93, make: -0.03 }, normal: { tov: 0, foul: 1, drain: 1, make: 0 }, mas: { tov: 0.28, foul: 1.25, drain: 1.12, make: 0.05 } } as const;
+  const FOCUS_W: Record<DefFocus, Record<ShotKind, number>> = {
+    equilibrada: { rim: 1, paint: 1, mid: 1, three: 1 },
+    pintura: { rim: 0.82, paint: 0.85, mid: 1, three: 1.12 },
+    perimetro: { rim: 1.12, paint: 1.05, mid: 0.92, three: 0.85 },
+  };
+  const FOCUS_MAKE: Record<DefFocus, Record<ShotKind, number>> = {
+    equilibrada: { rim: 0, paint: 0, mid: 0, three: 0 },
+    pintura: { rim: -0.15, paint: -0.15, mid: 0.06, three: 0.08 },
+    perimetro: { rim: 0.1, paint: 0.1, mid: -0.08, three: -0.12 },
+  };
   let possIdx = 0;
   const timeline: Snapshot[] | undefined = opts.timeline ? [] : undefined;
   const pending = [...(opts.interventions ?? [])].sort((a, b) => a.at - b.at);
@@ -320,7 +380,7 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
       for (const l of s.all) {
         if (l.onCourt) {
           l.box[F.sec] += t;
-          l.energy = Math.max(0.3, l.energy - t * T.drain * (1.35 - (l.r.sta / 100) * 0.7));
+          l.energy = Math.max(0.3, l.energy - t * T.drain * (1.35 - (l.r.sta / 100) * 0.7) * PRESS[defs[s.idx]!.pressure].drain * (1 + l.d.defensa / 150));
         } else {
           l.energy = Math.min(1, l.energy + t * T.recover);
         }
@@ -337,10 +397,10 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
 
   /** Rebote tras un fallo. Devuelve quién lo coge si es ofensivo; null si es defensivo. */
   const rebound = (O: Side, D: Side, base: number, blocked: boolean): Live | null => {
-    const diff = avg(O.court, (l) => eff(l, l.r.oreb)) - avg(D.court, (l) => eff(l, l.r.dreb));
+    const diff = avg(O.court, (l) => eff(l, l.r.oreb + 0.4 * l.d.rebote)) - avg(D.court, (l) => eff(l, l.r.dreb));
     const offensive = rng.chance(sig(logit(base) + T.bReb * diff / 20 - (blocked ? 0.3 : 0)));
     const S = offensive ? O : D;
-    const who = weighted(rng, S.court, (l) => Math.pow(Math.max(5, offensive ? l.r.oreb : l.r.dreb) / 50, 3));
+    const who = weighted(rng, S.court, (l) => Math.pow(Math.max(5, offensive ? l.r.oreb : l.r.dreb) / 50, 3) * (offensive ? Math.exp(0.03 * l.d.rebote) : 1));
     who.box[offensive ? F.orb : F.drb] += 1;
     ev(offensive ? EV.OREB : EV.DREB, S.idx, who.p.id);
     return offensive ? who : null;
@@ -377,7 +437,11 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
     const D = sides[1 - o]!;
     poss[o] += 1;
     let shotClock = 24;
-    let transition = transitionIn && rng.chance(T.transition);
+    // Si el rival cargó el rebote ofensivo, hay más opciones de correr.
+    const crash = avg(D.court, (l) => Math.max(0, l.d.rebote));
+    let transition = transitionIn && rng.chance(T.transition + 0.003 * crash);
+    const dd = defs[D.idx]!;
+    const press = PRESS[dd.pressure];
     let putbackBy: Live | null = null;
     let nsFoulDone = false;
 
@@ -394,7 +458,7 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
       // Pérdida
       if (!putbackBy) {
         const handler = weighted(rng, O.court, (l) => Math.pow(Math.max(5, l.r.handle) / 50, 4));
-        const pT = sig(logit(T.tov) - T.bTov * (eff(handler, handler.r.handle) - avg(D.court, (l) => eff(l, l.r.steal))) / 20);
+        const pT = sig(logit(T.tov) + press.tov - T.bTov * (eff(handler, handler.r.handle) - avg(D.court, (l) => eff(l, l.r.steal + 0.4 * l.d.robo))) / 20);
         if (rng.chance(pT * (phase > 0 ? 0.6 : 1))) {
           spend(dur * (0.3 + rng.next() * 0.7));
           const who = rng.chance(0.65) ? handler : weighted(rng, O.court, (l) => 60 - l.r.handle / 2);
@@ -402,7 +466,7 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
           const pSteal = T.stealShare + 0.25 * (avg(D.court, (l) => l.r.steal) - 50) / 50;
           let stealer = 0;
           if (rng.chance(pSteal)) {
-            const st = weighted(rng, D.court, (l) => Math.pow(Math.max(5, l.r.steal) / 50, 3));
+            const st = weighted(rng, D.court, (l) => Math.pow(Math.max(5, l.r.steal) / 50, 3) * Math.exp(0.03 * l.d.robo));
             st.box[F.stl] += 1;
             stealer = st.p.id;
           }
@@ -416,12 +480,12 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
       }
 
       // Falta sin tiro
-      if (!nsFoulDone && !putbackBy && !buzzer && rng.chance(T.nonShootingFoul)) {
+      if (!nsFoulDone && !putbackBy && !buzzer && rng.chance(T.nonShootingFoul * press.foul * Math.exp(0.006 * avg(D.court, (l) => l.d.defensa + l.d.robo)))) {
         nsFoulDone = true;
         const t = Math.max(1, dur * rng.next() * 0.8);
         spend(t);
         shotClock = Math.max(14, shotClock - t);
-        const fouler = weighted(rng, D.court, (l) => 110 - l.r.disc);
+        const fouler = weighted(rng, D.court, (l) => (110 - l.r.disc) * Math.exp(0.02 * (l.d.defensa + l.d.robo)));
         const fouled = weighted(rng, O.court, (l) => l.r.foulDraw);
         foul(D, fouler, fouled, false);
         autoSubs(O);
@@ -437,14 +501,15 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
       }
 
       // Tiro
-      const shooter = putbackBy ?? weighted(rng, O.court, (l) => l.usageMult * Math.exp(T.usageK * (eff(l, l.r.usage) - 55)));
+      const shooter = putbackBy ?? weighted(rng, O.court, (l) => l.usageMult * (l.p.id === dd.mark ? 0.6 : 1) * Math.exp(T.usageK * (eff(l, l.r.usage + l.d.uso) - 55)));
       const slot = O.court.indexOf(shooter);
       const defender = D.court[slot] ?? D.court[0]!;
       let kind: ShotKind;
       if (putbackBy) kind = rng.chance(0.85) ? 'rim' : 'paint';
       else {
         const plan = plans[o]!;
-        const w = { rim: shooter.kindW.rim * LEVEL_MULT[plan.rim], paint: shooter.kindW.paint * LEVEL_MULT[plan.paint], mid: shooter.kindW.mid * LEVEL_MULT[plan.mid], three: shooter.kindW.three * LEVEL_MULT[plan.three] };
+        const fw = FOCUS_W[dd.focus];
+        const w = { rim: shooter.kindW.rim * LEVEL_MULT[plan.rim] * fw.rim, paint: shooter.kindW.paint * LEVEL_MULT[plan.paint] * fw.paint, mid: shooter.kindW.mid * LEVEL_MULT[plan.mid] * fw.mid, three: shooter.kindW.three * LEVEL_MULT[plan.three] * fw.three };
         if (transition) {
           w.rim *= 2.2;
           w.mid *= 0.5;
@@ -453,29 +518,35 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
       }
       const corner = kind === 'three' && rng.chance(T.cornerShare + (shooter.r.three - 50) * 0.002);
       const others = O.court.filter((l) => l !== shooter);
-      const teamPass = avg(others, (l) => l.r.pass);
+      const teamPass = avg(others, (l) => l.r.pass + 0.5 * l.d.pase);
       const assistedOpp = !putbackBy && rng.chance(sig(logit(T.assistOpp[kind]) + T.bAssist * (teamPass - 50) / 20));
       const off = eff(shooter, kind === 'three' ? shooter.r.three : kind === 'mid' ? shooter.r.mid : kind === 'rim' ? shooter.r.rim : shooter.r.post);
       const help = avg(D.court, (l) => l.r.help);
       const rimP = Math.max(...D.court.map((l) => eff(l, l.r.rimProt)));
+      const effort = 0.15 * defender.d.defensa;
       const def =
-        kind === 'three' || kind === 'mid'
+        effort +
+        (kind === 'three' || kind === 'mid'
           ? 0.7 * eff(defender, defender.r.perD) + 0.3 * help
           : kind === 'rim'
             ? 0.4 * eff(defender, defender.r.intD) + 0.6 * rimP
-            : 0.5 * eff(defender, defender.r.intD) + 0.5 * rimP;
+            : 0.5 * eff(defender, defender.r.intD) + 0.5 * rimP);
+      const kindD = kind === 'three' ? shooter.d.tres : kind === 'mid' ? shooter.d.media : kind === 'rim' ? shooter.d.aro : shooter.d.poste;
+      const forced = putbackBy ? 0 : T.usageK * shooter.d.uso + T.kindK * kindD;
+      const markAdj = dd.mark === null ? 0 : shooter.p.id === dd.mark ? -0.22 : 0.04;
       const margin = score[o] - score[1 - o];
       const clutch = period >= 4 && clock < 120 && Math.abs(margin) <= 6 ? 0.25 * (shooter.r.clutch - 50) / 50 : 0;
       let lg =
         logit(T.make[kind]) + T.bMake * (off - def) / 20 + (assistedOpp ? T.assistedBonus : -0.04) +
         (transition ? T.transitionBonus : 0) + (o === 0 ? T.homeBonus : -T.homeBonus) + clutch +
         (corner ? T.cornerBonus : 0) + (buzzer ? T.buzzerPenalty : 0) + (putbackBy ? 0.1 : 0) +
-        (garbage() && margin > 0 ? T.garbageRelax : 0) - T.forcedShot * Math.log(planMult(O, kind) * (putbackBy ? 1 : shooter.usageMult)) - T.scoreRegression * Math.max(-25, Math.min(25, margin)) / 10;
-      const pFoul = sig(logit(T.shootFoul[kind]) + 0.4 * (shooter.r.foulDraw - 50) / 20 + 0.3 * (50 - defender.r.disc) / 20);
+        (garbage() && margin > 0 ? T.garbageRelax : 0) - T.forcedShot * Math.log(planMult(O, kind) * (putbackBy ? 1 : shooter.usageMult)) - T.scoreRegression * Math.max(-25, Math.min(25, margin)) / 10 -
+        T.forcedShot * forced + markAdj + press.make + FOCUS_MAKE[dd.focus][kind] + 0.003 * avg(D.court, (l) => l.d.robo);
+      const pFoul = sig(logit(T.shootFoul[kind]) + 0.4 * (shooter.r.foulDraw - 50) / 20 + 0.3 * (50 - defender.r.disc) / 20 + 0.008 * defender.d.defensa + (kind === 'rim' || kind === 'paint' ? 0.006 * avg(D.court, (l) => l.d.tapon) : 0));
       const fouled = !buzzer && rng.chance(pFoul);
       if (fouled) lg -= 0.55; // los tiros con falta entran menos
-      const blocker = kind === 'rim' || kind === 'paint' ? weighted(rng, D.court, (l) => Math.pow(Math.max(5, l.r.rimProt) / 50, 4)) : defender;
-      const blocked = !fouled && rng.chance(sig(logit(T.block[kind]) + T.bBlock * (eff(blocker, blocker.r.rimProt) - off) / 20));
+      const blocker = kind === 'rim' || kind === 'paint' ? weighted(rng, D.court, (l) => Math.pow(Math.max(5, l.r.rimProt) / 50, 4) * Math.exp(0.04 * l.d.tapon)) : defender;
+      const blocked = !fouled && rng.chance(sig(logit(T.block[kind]) + T.bBlock * (eff(blocker, blocker.r.rimProt) - off) / 20 + 0.012 * blocker.d.tapon));
       const made = !blocked && rng.chance(sig(lg));
       spend(dur);
 
@@ -486,7 +557,7 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
         shooter.box[three ? F.fgm3 : F.fgm2] += 1;
         addPts(O, shooter, three ? 3 : 2);
         if (assistedOpp) {
-          passer = weighted(rng, others, (l) => Math.pow(Math.max(5, l.r.pass) / 50, 2.5));
+          passer = weighted(rng, others, (l) => Math.pow(Math.max(5, l.r.pass) / 50, 2.5) * Math.exp(0.04 * l.d.pase));
           passer.box[F.ast] += 1;
         }
       }
@@ -564,6 +635,7 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
           ev(EV.TIMEOUT, s.idx);
         } else if (iv.kind === 'plan') plans[iv.side] = { ...iv.shot };
         else if (iv.kind === 'auto') autoOn[iv.side] = iv.on;
+        else if (iv.kind === 'defense') defs[iv.side] = { ...iv.defense };
       }
       if (timeline) {
         const energy: Record<number, number> = {};

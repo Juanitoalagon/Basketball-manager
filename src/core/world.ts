@@ -15,6 +15,7 @@ import { Rng, mixSeed } from './rng';
 import { type Db, bumpRevision, transaction } from './schema';
 import { COMP, getUniverse, insertPlayer, freeNumber, roundRobin, scheduleKnockout, standings, type StandingRow } from './season';
 import { addNews, askSalary, payroll, type MarketResult } from './market';
+import { aiMarketDay } from './transfers';
 
 export const EURO = [4, 5, 6] as const;
 const EUROLEAGUE_LICENSES = ['RMA', 'FCB', 'BAS', 'VBC'];
@@ -221,14 +222,17 @@ export function afterDay(db: Db, season: number, day: number, seed: number, stag
     }
   }
   if (day % 4 === 0) aiInSeason(db, season, mixSeed(seed, day * 101));
+  // Paciencia nueva a mitad de temporada (tras la primera vuelta).
+  if (day === 17) db.exec('DELETE FROM negotiation WHERE season = ?', [season]);
+  ev.push(...aiMarketDay(db, seed));
   return ev;
 }
 
 /* ───────────── IA durante la temporada ───────────── */
 
 function freeAgentsByOvr(db: Db, season: number) {
-  return db.rows<{ id: number; name: string; ovr: number; birth_year: number; potential_est: number; morale: number; nationality: string }>(
-    `SELECT p.id, p.name, a.ovr, p.birth_year, p.potential_est, p.morale, p.nationality FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
+  return db.rows<{ id: number; name: string; ovr: number; birth_year: number; potential_est: number; morale: number; nationality: string; pos1: Pos; pos2: Pos | null }>(
+    `SELECT p.id, p.name, a.ovr, p.birth_year, p.potential_est, p.morale, p.nationality, p.pos1, p.pos2 FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
      WHERE p.club_id IS NULL AND p.retired = 0 AND p.youth = 0 ORDER BY a.ovr DESC`,
     [season],
   );
@@ -238,13 +242,17 @@ function freeAgentsByOvr(db: Db, season: number) {
 export function aiSignFreeAgent(db: Db, clubId: number, season: number, until: number, rng: Rng): string | null {
   const c = db.rows<{ name: string; budget: number }>('SELECT name, budget FROM club WHERE id = ?', [clubId])[0]!;
   const room = c.budget - payroll(db, clubId);
-  const fa = freeAgentsByOvr(db, season).find((f) =>
-    askSalary({ ovr: f.ovr, age: season - f.birth_year, potential_est: f.potential_est, morale: f.morale }) <= Math.max(room, 60_000) && !cupoAllowsIn(db, clubId, f.nationality));
+  const needs = positionNeeds(db, clubId);
+  const ok = (f: ReturnType<typeof freeAgentsByOvr>[number]) =>
+    askSalary({ ovr: f.ovr, age: season - f.birth_year, potential_est: f.potential_est, morale: f.morale }) <= Math.max(room, 60_000) && !cupoAllowsIn(db, clubId, f.nationality);
+  const fas = freeAgentsByOvr(db, season);
+  // Primero, alguien del puesto que falta.
+  const fa = (needs.length ? fas.find((f) => ok(f) && needs.includes(f.pos1)) : undefined) ?? fas.find(ok);
   if (!fa) return null;
   const ask = askSalary({ ovr: fa.ovr, age: season - fa.birth_year, potential_est: fa.potential_est, morale: fa.morale });
   const nums = new Set(db.rows<{ number: number }>('SELECT number FROM player WHERE club_id = ? AND number IS NOT NULL', [clubId]).map((x) => x.number));
   db.exec('UPDATE player SET club_id = ?, number = ? WHERE id = ?', [clubId, freeNumber(rng, nums), fa.id]);
-  db.exec('INSERT OR REPLACE INTO contract VALUES (?,?,?,?)', [fa.id, clubId, Math.min(ask, Math.max(room, 60_000)), until]);
+  db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [fa.id, clubId, Math.min(ask, Math.max(room, 60_000)), until]);
   db.exec('INSERT INTO transfer (season, day, player_id, from_club, to_club, fee, salary, until, kind) VALUES (?, (SELECT game_day FROM universe), ?, NULL, ?, 0, ?, ?, ?)', [season, fa.id, clubId, ask, until, 'libre']);
   return `${c.name} ficha a ${fa.name} (agente libre).`;
 }
@@ -255,11 +263,31 @@ export function aiInSeason(db: Db, season: number, seed: number) {
   for (const c of db.rows<{ id: number }>('SELECT id FROM club WHERE id IS NOT ?', [u.user_club_id])) {
     const healthy = db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0 AND injury_games = 0', [c.id])[0]!.n;
     const total = db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [c.id])[0]!.n;
-    if (healthy < 10 && total < 16) {
+    if ((healthy < 10 || positionNeeds(db, c.id).length > 0) && total < 16) {
       const msg = aiSignFreeAgent(db, c.id, season, season, rng);
       if (msg) addNews(db, 'fichaje', msg, c.id);
     }
   }
+}
+
+/** Puestos con menos de dos jugadores en plantilla (por posición principal; los lesionados cuentan). */
+export function positionNeeds(db: Db, clubId: number): Pos[] {
+  const n: Record<string, number> = { PG: 0, SG: 0, SF: 0, PF: 0, C: 0 };
+  for (const r of db.rows<{ pos1: string }>('SELECT pos1 FROM player WHERE club_id = ? AND retired = 0', [clubId])) n[r.pos1] = (n[r.pos1] ?? 0) + 1;
+  return POSITIONS.filter((p) => n[p]! < 2);
+}
+
+/** En pretemporada: cada club de la IA cubre los puestos que le faltan (hasta 16 jugadores). */
+export function aiFillNeeds(db: Db, season: number, userClub: number | null, rng: Rng, events: string[]) {
+  for (const c of db.rows<{ id: number }>('SELECT id FROM club WHERE id IS NOT ?', [userClub])) {
+    for (let k = 0; k < 3 && positionNeeds(db, c.id).length; k++) {
+      if (db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [c.id])[0]!.n >= 16) break;
+      const msg = aiSignFreeAgent(db, c.id, season, season + 1, rng);
+      if (!msg) break;
+      addNews(db, 'fichaje', msg, c.id);
+    }
+  }
+  void events;
 }
 
 /* ───────────── Cantera y ojeadores ───────────── */
@@ -291,7 +319,7 @@ export function promoteYouth(db: Db, playerId: number, clubId: number): MarketRe
   transaction(db, () => {
     const nums = new Set(db.rows<{ number: number }>('SELECT number FROM player WHERE club_id = ? AND number IS NOT NULL', [clubId]).map((x) => x.number));
     db.exec('UPDATE player SET youth = 0, club_id = ?, number = ?, morale = 80 WHERE id = ?', [clubId, freeNumber(new Rng(playerId), nums), playerId]);
-    db.exec('INSERT OR REPLACE INTO contract VALUES (?,?,?,?)', [playerId, clubId, 30_000, u.game_season + 3]);
+    db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [playerId, clubId, 30_000, u.game_season + 3]);
     addNews(db, 'cantera', `${p.name} sube de la cantera al primer equipo.`, clubId, playerId);
     bumpRevision(db);
   });
@@ -319,7 +347,7 @@ export function youthOffseason(db: Db, season: number, userClub: number | null, 
         events.push(`${y.name} cumple 19 años sin subir al primer equipo y deja tu cantera.`);
       } else if (y.potential_est >= 60 && db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [c.id])[0]!.n < 15) {
         db.exec('UPDATE player SET youth = 0, club_id = ? WHERE id = ?', [c.id, y.id]);
-        db.exec('INSERT OR REPLACE INTO contract VALUES (?,?,?,?)', [y.id, c.id, 30_000, season + 2]);
+        db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [y.id, c.id, 30_000, season + 2]);
       } else db.exec('UPDATE player SET youth = 0 WHERE id = ?', [y.id]);
     }
   }

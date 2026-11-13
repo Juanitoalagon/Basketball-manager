@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BOX_FIELDS, simulateGame } from '../src/core/engine';
+import { BOX_FIELDS, DEFAULT_TACTICS, TEND_KEYS, naturalTendencies, simulateGame } from '../src/core/engine';
 import { ZONES, isThree, zoneOf } from '../src/core/court';
 import { TARGETS, makeLeague, runBench } from './calib';
 
@@ -92,6 +92,38 @@ describe('órdenes del entrenador', () => {
     const r = simulateGame({ ...t, lineup: { starters, roles: { [out]: 'fuera' } } }, teams[4]!, 77);
     for (const id of starters) expect(r.starters.has(id)).toBe(true);
     expect(r.box.get(out)![F.sec]!).toBeLessThan(120);
+  });
+});
+
+describe('tendencias de jugador y defensa', () => {
+  const sum = (home: typeof teams[number], away: typeof teams[number], f: (r: ReturnType<typeof simulateGame>) => number, n = 120) => {
+    let t = 0;
+    for (let g = 0; g < n; g++) t += f(simulateGame(home, away, 5000 + g));
+    return t / n;
+  };
+  it('sin ajustes las tendencias naturales no cambian nada', () => {
+    const p = teams[0]!.players[0]!;
+    const nat = naturalTendencies(p.attrs, p.height_cm);
+    const home = { ...teams[0]!, players: teams[0]!.players.map((x, i) => (i === 0 ? { ...x, tend: { ...nat } } : x)) };
+    expect(simulateGame(home, teams[1]!, 77).shots).toEqual(simulateGame(teams[0]!, teams[1]!, 77).shots);
+    for (const k of TEND_KEYS) { expect(nat[k]).toBeGreaterThanOrEqual(1); expect(nat[k]).toBeLessThanOrEqual(99); }
+  });
+  it('subir la tendencia de triple de un interior le hace tirar triples; bajarla a un tirador, menos', () => {
+    const byTres = [...teams[0]!.players].sort((a, b) => naturalTendencies(a.attrs, a.height_cm).tres - naturalTendencies(b.attrs, b.height_cm).tres);
+    const big = byTres[0]!;
+    const shooter = byTres[byTres.length - 1]!;
+    const home = { ...teams[0]!, players: teams[0]!.players.map((x) => (x.id === big.id ? { ...x, tend: { tres: 90 } } : x.id === shooter.id ? { ...x, tend: { tres: 10 } } : x)) };
+    const threes = (id: number) => (r: ReturnType<typeof simulateGame>) => r.box.get(id)![F.fga3]!;
+    expect(sum(home, teams[1]!, threes(big.id))).toBeGreaterThan(sum(teams[0]!, teams[1]!, threes(big.id)) * 3 + 0.5);
+    expect(sum(home, teams[1]!, threes(shooter.id))).toBeLessThan(sum(teams[0]!, teams[1]!, threes(shooter.id)) * 0.5);
+  });
+  it('la presión fuerza más pérdidas del rival y cerrar la pintura le hace tirar más triples', () => {
+    const tov = (r: ReturnType<typeof simulateGame>) => [...r.box].filter(([id]) => r.side.get(id) === 1).reduce((a, [, b]) => a + b[F.tov]!, 0);
+    const fga3 = (r: ReturnType<typeof simulateGame>) => [...r.box].filter(([id]) => r.side.get(id) === 1).reduce((a, [, b]) => a + b[F.fga3]!, 0);
+    const press = { ...teams[0]!, tactics: { ...DEFAULT_TACTICS, defense: { pressure: 'mas' as const, focus: 'equilibrada' as const, mark: null } } };
+    const paint = { ...teams[0]!, tactics: { ...DEFAULT_TACTICS, defense: { pressure: 'normal' as const, focus: 'pintura' as const, mark: null } } };
+    expect(sum(press, teams[1]!, tov)).toBeGreaterThan(sum(teams[0]!, teams[1]!, tov) + 0.8);
+    expect(sum(paint, teams[1]!, fga3)).toBeGreaterThan(sum(teams[0]!, teams[1]!, fga3) + 1);
   });
 });
 

@@ -55,17 +55,19 @@ progress { width: 100%; height: 12px; margin-top: 10px; accent-color: var(--acce
 .tabs button.on { background: var(--accent); border-color: var(--accent); color: #17100a; }
 .tabs.small button { min-height: 36px; font-size: 0.88rem; flex: 0 0 auto; }
 
-.tbl { overflow-x: auto; margin: 6px -12px 0; padding: 0 12px; }
+.tbl { overflow-x: auto; margin: 6px 0 0; background: var(--card); border-radius: 10px; border: 1px solid var(--line); }
+section .tbl { border: none; margin: 6px -12px 0; border-radius: 0; }
 table { border-collapse: separate; border-spacing: 0; font-size: 0.86rem; font-variant-numeric: tabular-nums; width: 100%; }
 caption { text-align: left; color: var(--muted); padding-bottom: 6px; }
 th, td { padding: 8px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; text-align: right; }
 th { color: var(--muted); font-weight: 600; font-size: 0.78rem; user-select: none; cursor: pointer; }
 th.sorted { color: var(--accent); }
 th.l, td.l { text-align: left; }
-th:first-child, td:first-child { position: sticky; left: 0; background: var(--card); z-index: 1; max-width: 46vw; overflow: hidden; text-overflow: ellipsis; }
+th:first-child, td:first-child { position: sticky; left: 0; background: var(--card); z-index: 2; max-width: 44vw; overflow: hidden; text-overflow: ellipsis; box-shadow: 1px 0 0 var(--line), 4px 0 6px -4px rgba(0, 0, 0, 0.35); }
 tr.me td { background: var(--me); }
 tr.me td:first-child { background: color-mix(in oklab, var(--card), var(--accent) 12%); }
 tr.tap:active td { background: var(--card2); }
+tr.tap:active td:first-child { background: var(--card2); }
 tfoot td { font-weight: 700; border-top: 2px solid var(--line); }
 td.wrap { white-space: normal; }
 .num { color: var(--muted); display: inline-block; min-width: 1.4em; }
@@ -108,8 +110,12 @@ ul.plain.games li > span:first-child { min-width: 2.2em; }
 .av { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
 
 .court { width: 100%; max-width: 560px; display: block; margin: 8px auto; border-radius: 8px; }
-.zl1 { font-size: 3.6px; font-weight: 700; fill: #fff; paint-order: stroke; stroke: rgba(0,0,0,0.55); stroke-width: 0.6px; }
-.zl2 { font-size: 3px; fill: #fff; paint-order: stroke; stroke: rgba(0,0,0,0.55); stroke-width: 0.5px; }
+.zbox { fill: rgba(255, 255, 255, 0.86); stroke: rgba(0, 0, 0, 0.25); stroke-width: 0.25; }
+.zl1 { font-size: 3.7px; font-weight: 800; fill: #11161d; }
+.zl2 { font-size: 3.3px; font-weight: 700; fill: #11161d; }
+.zl3 { font-size: 2.5px; fill: #3d4654; }
+:root { --z-bad2: #d9534a; --z-bad: #ec9a6a; --z-avg: #e9d27a; --z-good: #8fcf7e; --z-good2: #3fa65a; --zone-edge: rgba(0, 0, 0, 0.35); }
+.court.zones { background: var(--zone-empty); }
 .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); justify-content: center; }
 .legend .sw { width: 14px; height: 14px; border-radius: 3px; display: inline-block; margin-left: 8px; }
 
@@ -134,7 +140,8 @@ nav.bottom .ic { font-size: 1.25rem; line-height: 1; }
 @media (min-width: 620px) { dl { grid-template-columns: 220px 1fr; } dt, dd { margin-top: 6px; } .kpis { grid-template-columns: repeat(8, 1fr); } }
 .slot { display: grid; grid-template-columns: 8.5em 1fr; gap: 8px; align-items: center; padding: 4px 0; }
 .slot select { width: 100%; }
-.slot .tabs { margin: 0; }
+.slot .tabs { margin: 0; flex-wrap: wrap; }
+.slot .tabs.small button { flex: 1 0 auto; padding: 0 10px; }
 td select { min-height: 36px; padding: 0 8px; font-size: 0.85rem; }
 .ab.dual { position: relative; }
 .ab.dual .real { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--ink); opacity: 0.75; }
@@ -225,3 +232,71 @@ nav.bottom button { font-size: 0.68rem; }
 .gamepick { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
 .live-screen section { padding: 10px; }
 .oppline { font-size: 0.78rem; color: var(--muted); margin-top: 6px; }
+/* v0.6 */
+.arch { font-size: 0.66rem; color: var(--accent2); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.archs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.archs span { font-size: 0.78rem; font-weight: 700; color: var(--accent2); border: 1px solid var(--accent2); border-radius: 999px; padding: 1px 9px; }
+.archs span + span { opacity: 0.75; }
+.tend { padding: 8px 0; border-top: 1px solid var(--line); }
+.tend .tl { display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+.tend input[type='range'] { width: 100%; accent-color: var(--accent); margin: 6px 0 2px; height: 28px; }
+.tend .bar { height: 8px; background: var(--card2); border-radius: 4px; margin: 6px 0; overflow: hidden; }
+.tend .bar i { display: block; height: 100%; background: var(--accent2); }
+.av { min-width: 2.4em; text-align: center; border-radius: 6px; padding: 0 6px; }
+button.small-btn { min-height: 34px; padding: 0 10px; font-size: 0.82rem; margin-top: 6px; }
+button.sec.on { border-color: var(--warn); color: var(--warn); }
+.oncourt.three { grid-template-columns: repeat(3, 1fr); }
+.money { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.kinput { display: inline-flex; align-items: center; gap: 4px; }
+.kinput input[type='number'] { width: 96px; text-align: right; font-weight: 700; }
+.pat { margin: 6px 0; }
+.pat .fat { margin: 3px 0 0; height: 6px; }
+.offer { border-top: 1px solid var(--line); padding: 8px 0; }
+ul.pick li { padding: 2px 0; }
+.mk { padding: 8px 12px; } .mk.open { border-color: var(--good); }
+/* v0.6: premios */
+.awards li.award { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+.awards li.award > span:not(.face) { flex: 1; }
+.awards li.award.me { background: var(--me); }
+h4.aw { margin: 12px 0 4px; font-size: 0.82rem; color: var(--accent); text-transform: uppercase; letter-spacing: 0.03em; }
+
+.pname { white-space: nowrap; }
+
+/* Comparar */
+.cmpbar { display: grid; grid-template-columns: 2.2em 1fr 2.2em; grid-template-rows: auto auto; gap: 0 8px; align-items: center; margin: 6px 0; font-variant-numeric: tabular-nums; }
+.cmpbar small { grid-column: 2; grid-row: 1; color: var(--muted); font-size: 0.75rem; order: -1; }
+.cmpbar > span:first-child { grid-row: 2; text-align: right; }
+.cmpbar > span:nth-child(3) { grid-row: 2; }
+.cmpbar .bars { grid-row: 2; grid-column: 2; display: flex; flex-direction: column; gap: 2px; }
+.cmpbar .bars i { display: block; height: 5px; border-radius: 3px; }
+.cmpbar .bars i.l { background: var(--accent); }
+.cmpbar .bars i.r { background: var(--accent2); }
+
+/* ── Horizontal: móvil girado y tablet ── */
+@media (orientation: landscape) and (min-width: 700px) {
+  main { max-width: 1280px; }
+  /* Directo: pista y marcador fijos a la izquierda; cambios, defensa y relato a la derecha. */
+  .lv { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+  .lv-left { position: sticky; top: 6px; }
+  .lv-right > section:first-child { margin-top: 10px; }
+}
+@media (orientation: landscape) and (max-height: 500px) {
+  /* Móvil en horizontal: menos alto perdido en la barra de abajo y en los márgenes. */
+  nav.bottom button { min-height: 40px; flex-direction: row; gap: 6px; font-size: 0.78rem; }
+  nav.bottom .ic { font-size: 1rem; }
+  main { padding-bottom: calc(52px + env(safe-area-inset-bottom)); padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
+  .hero .big { font-size: 1.3rem; }
+  section, .card { margin: 8px 0; padding: 10px; }
+  .lv-left { max-height: calc(100vh - 12px); overflow-y: auto; }
+  /* En el directo, sin la barra de abajo: cada píxel de alto cuenta. */
+  body:has(.live-screen) nav.bottom { display: none; }
+  body:has(.live-screen) main { padding-bottom: 12px; }
+  .court-live svg { max-height: 40vh; }
+  .lv-left .hero { padding: 6px 10px; }
+  .lv-left .scorebug .sc { font-size: 1.35rem; }
+  .lv-left .lastplay { min-height: 0; margin: 4px 0; font-size: 0.82rem; }
+  .lv-left .court-live .row { margin-top: 2px; }
+  .lv-left .row { margin-top: 6px; gap: 6px; }
+  .lv-left button { min-height: 38px; padding: 0 10px; }
+  .lv-left .tabs.small button { min-height: 32px; }
+}

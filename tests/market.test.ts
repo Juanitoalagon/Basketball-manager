@@ -3,6 +3,7 @@ import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import { wrapDb } from '../src/db/adapter';
 import { migrate, type Db } from '../src/core/schema';
 import { advanceDay, chooseClub, createUniverse, getUniverse, startNewSeason } from '../src/core/season';
+import { requiredSalary, sellerWants } from '../src/core/transfers';
 import { askSalary, buyPlayer, finances, marketInfo, marketValue, offersFor, payroll, releasePlayer, renewPlayer, sellPlayer, signFreeAgent } from '../src/core/market';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -41,7 +42,8 @@ describe('operaciones', () => {
     const info = marketInfo(db, fa);
     expect(signFreeAgent(db, ME, fa, Math.round(info.ask * 0.5), 2).ok).toBe(false);
     db.exec('UPDATE club SET budget = budget + 500000 WHERE id = ?', [ME]);
-    const r = signFreeAgent(db, ME, fa, info.ask, 2);
+    // Lo que pide depende del atractivo del club y de los años: se negocia con su cifra.
+    const r = signFreeAgent(db, ME, fa, requiredSalary(db, fa, ME, 2, null), 2);
     expect(r.ok).toBe(true);
     expect(one('SELECT club_id FROM contract WHERE player_id = ?', [fa])).toBe(ME);
   });
@@ -51,9 +53,10 @@ describe('operaciones', () => {
     db.exec('UPDATE club SET cash = 50000000, budget = budget + 2000000 WHERE id = ?', [ME]);
     expect(buyPlayer(db, ME, target, Math.round(info.value * 0.5), info.ask, 2).ok).toBe(false);
     const cash3 = one('SELECT cash FROM club WHERE id = 3');
-    const r = buyPlayer(db, ME, target, info.value, info.ask, 2);
+    const fee = sellerWants(db, target).wanted;
+    const r = buyPlayer(db, ME, target, fee, requiredSalary(db, target, ME, 2, null), 2);
     expect(r.ok).toBe(true);
-    expect(one('SELECT cash FROM club WHERE id = 3')).toBe(cash3 + info.value);
+    expect(one('SELECT cash FROM club WHERE id = 3')).toBe(cash3 + fee);
     expect(one("SELECT COUNT(*) FROM transfer WHERE kind = 'traspaso'")).toBe(1);
   });
   it('vender, rescindir y renovar', () => {

@@ -8,11 +8,13 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { COURT, CORNER_Y } from '../core/court';
-import { EV, type Intervention, type Level, type Snapshot, type Tactics } from '../core/engine';
+import { DEFAULT_DEFENSE, type DefFocus, type Defense, EV, type Intervention, type Level, type Snapshot, type Tactics } from '../core/engine';
 import { COMP_INFO } from '../core/names';
 import { call } from '../db/client';
 import { Face, parseColors } from './Face';
-import { Loading, type Nav, Tabs, clock } from './kit';
+import { Loading, type Nav, Tabs, clock, shortName } from './kit';
+import { DEF_HELP, FOCUS, PRESSURE } from './tactics';
+import { PreviewView } from './preview';
 import { pbpText } from './screens';
 
 interface Person { id: number; name: string; number: number | null; pos1: string; ovr: number; nationality: string; birth_year: number; origin: string }
@@ -24,6 +26,7 @@ interface Info {
   roster: [number[], number[]];
   options: number[];
   season: number;
+  meta: Record<number, { atPos: number[]; arch: string }>;
 }
 interface Sim { score: [number, number]; ot: number; pbp: number[][]; timeline: Snapshot[] }
 
@@ -191,6 +194,8 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
   const [speed, setSpeed] = useState('600');
   const [pick, setPick] = useState<number | null>(null);
   const [plan, setPlan] = useState<Tactics['shot'] | null>(null);
+  const [def, setDef] = useState<Defense>(DEFAULT_DEFENSE);
+  const [showPrev, setShowPrev] = useState(true);
   const [auto, setAuto] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -205,7 +210,9 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
       setInfo(i);
       if (i) {
         const clubId = i.userSide === 0 ? i.game.home_id : i.game.away_id;
-        setPlan((await call<Tactics>('tactics', { clubId })).shot);
+        const t = await call<Tactics>('tactics', { clubId });
+        setPlan(t.shot);
+        setDef({ ...DEFAULT_DEFENSE, ...t.defense, mark: null });
       }
     }).catch((e: Error) => setErr(e.message));
   }, [gameId]);
@@ -228,14 +235,17 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
   const names = useMemo(() => Object.fromEntries(info?.people.map((p) => [p.id, p.name]) ?? []), [info]);
   // Estadística de cada jugador hasta la posesión actual, sacada del relato.
   const stats = useMemo(() => {
-    const m = new Map<number, { pts: number; reb: number; ast: number }>();
-    const g = (id: number) => m.get(id) ?? m.set(id, { pts: 0, reb: 0, ast: 0 }).get(id)!;
+    const m = new Map<number, { pts: number; reb: number; ast: number; fgm: number; fga: number }>();
+    const g = (id: number) => m.get(id) ?? m.set(id, { pts: 0, reb: 0, ast: 0, fgm: 0, fga: 0 }).get(id)!;
     for (const e of sim?.pbp ?? []) {
       if (e[7]! >= cursor) break;
       if (e[0] === EV.MADE) {
         g(e[4]!).pts += Math.floor((e[6]! % 100) / 10);
+        g(e[4]!).fgm += 1;
+        g(e[4]!).fga += 1;
         if (e[5]) g(e[5]).ast += 1;
-      } else if (e[0] === EV.FT_MADE) g(e[4]!).pts += 1;
+      } else if (e[0] === EV.MISS) g(e[4]!).fga += 1;
+      else if (e[0] === EV.FT_MADE) g(e[4]!).pts += 1;
       else if (e[0] === EV.OREB || e[0] === EV.DREB) g(e[4]!).reb += 1;
     }
     return m;
@@ -272,7 +282,17 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
   };
   const court = snap.court[side];
   const opp = snap.court[side === 0 ? 1 : 0];
-  const bench = info.roster[side].filter((id) => !court.includes(id));
+  const pickSlot = pick !== null ? court.indexOf(pick) : -1;
+  // Banquillo ordenado por su media en el puesto del que sale (los eliminados, al final).
+  const bench = info.roster[side].filter((id) => !court.includes(id)).sort((a, b) =>
+    Number((snap.fouls[a] ?? 0) >= 5) - Number((snap.fouls[b] ?? 0) >= 5) ||
+    (pickSlot >= 0 ? (info.meta[b]?.atPos[pickSlot] ?? 0) - (info.meta[a]?.atPos[pickSlot] ?? 0) : 0));
+  // El rival que más daño está haciendo (puntos, rebotes y asistencias).
+  const oppAll = info.roster[side === 0 ? 1 : 0];
+  const heat = (id: number) => { const x = stats.get(id); return x ? x.pts + 0.5 * x.reb + 0.7 * x.ast : 0; };
+  const hot = [...oppAll].sort((a, b) => heat(b) - heat(a))[0];
+  const hotS = hot !== undefined ? stats.get(hot) : undefined;
+  const setDefense = (d: Defense) => { setDef(d); add({ kind: 'defense', defense: d } as Intervention); };
   const events = sim.pbp.filter((e) => e[7]! < cursor && (e[0] !== EV.SUB || e[3] === side)).slice(-14).reverse();
   const lastPlay = events.find((e) => e[0] !== EV.START && e[0] !== EV.END);
   const periodLabel = snap.period <= 4 ? `${snap.period}º cuarto` : snap.period === 5 ? 'Prórroga' : `${snap.period - 4}ª prórroga`;
@@ -313,6 +333,8 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
           ))}
         </div>
       )}
+      <div className="lv">
+      <div className="lv-left">
       <section className="hero">
         <div className="muted small" style={{ textAlign: 'center' }}>{COMP_INFO[info.game.competition_id]?.name ?? ''} · día {info.game.day}</div>
         <div className="scorebug">
@@ -327,6 +349,12 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
         <p className="lastplay">{lastPlay ? <><span className="muted">{clock(lastPlay[2]!)} · {shorts[lastPlay[3]!]}</span> {pbpText(lastPlay, names)}</> : <span className="muted">Pulsa «Jugar» para empezar.</span>}</p>
       </section>
       {err && <p className="error">{err}</p>}
+      {cursor === 0 && (
+        <div className="row">
+          <button className="sec" onClick={() => setShowPrev(!showPrev)}>{showPrev ? 'Ocultar la previa' : 'Ver la previa'}</button>
+        </div>
+      )}
+      {cursor === 0 && showPrev && <PreviewView gameId={info.game.id} nav={nav} />}
 
       {!finished ? (
         <div className="row">
@@ -341,6 +369,8 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
           <button disabled={saving} onClick={() => void save()}>{saving ? 'Guardando…' : 'Guardar resultado y ver estadísticas'}</button>
         </div>
       )}
+      </div>
+      <div className="lv-right">
 
       <section>
         <h3>En pista · {club(side).short} {!finished && <span className="muted small">— toca un jugador para cambiarlo</span>}</h3>
@@ -354,6 +384,7 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
                 <PFace p={p} age={age(p)} colors={myColors} size={40} />
                 <div className="n">{p.name.split(' ').slice(-1)[0]}</div>
                 <div className="muted">{p.pos1} · {p.ovr}</div>
+                <div className="arch">{info.meta[id]?.arch}</div>
                 <div><b>{st.pts}</b> pts · {st.reb} r</div>
                 <Energy e={snap.energy[id] ?? 1} />
               </div>
@@ -372,7 +403,8 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
                     {(snap.fouls[id] ?? 0) > 0 && <span className="fouls">{snap.fouls[id]}f</span>}
                     <PFace p={p} age={age(p)} colors={myColors} size={34} />
                     <div className="n">{p.name.split(' ').slice(-1)[0]}</div>
-                    <div className="muted">{p.pos1} · {p.ovr}</div>
+                    <div className="muted">{pickSlot >= 0 ? `${['PG', 'SG', 'SF', 'PF', 'C'][pickSlot]} ${info.meta[id]?.atPos[pickSlot] ?? p.ovr}` : `${p.pos1} · ${p.ovr}`}</div>
+                    <div className="arch">{info.meta[id]?.arch}</div>
                     <Energy e={snap.energy[id] ?? 1} />
                     {out && <div className="bad">Eliminado</div>}
                   </div>
@@ -395,6 +427,31 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
         <h3>Marcador</h3>
         <GameFlow timeline={sim.timeline} cursor={cursor} total={last} ink={ink} shorts={shorts} />
       </section>
+
+      {!finished && (
+        <section>
+          <h3>Defensa</h3>
+          {hot !== undefined && hotS && hotS.pts > 0 && (
+            <p className="small">🔥 En racha: <b>{people.get(hot)?.name}</b> — {hotS.pts} pts ({hotS.fgm}/{hotS.fga}), {hotS.reb} reb, {hotS.ast} ast{opp.includes(hot) ? ' · en pista' : ' · en el banquillo'}</p>
+          )}
+          <div className="slot">
+            <span className="sl">Intensidad</span>
+            <Tabs<Level> small value={def.pressure} onChange={(v) => setDefense({ ...def, pressure: v })} options={PRESSURE} />
+          </div>
+          <div className="slot">
+            <span className="sl">Prioridad</span>
+            <Tabs<DefFocus> small value={def.focus} onChange={(v) => setDefense({ ...def, focus: v })} options={FOCUS} />
+          </div>
+          <div className="slot">
+            <span className="sl">Marcaje especial</span>
+            <select value={def.mark ?? ''} onChange={(e) => setDefense({ ...def, mark: e.target.value ? Number(e.target.value) : null })} aria-label="Marcaje especial">
+              <option value="">Nadie</option>
+              {oppAll.map((id) => <option key={id} value={id}>{shortName(people.get(id)?.name ?? '')} · {stats.get(id)?.pts ?? 0} pts{id === hot ? ' 🔥' : ''}</option>)}
+            </select>
+          </div>
+          <p className="muted small">{DEF_HELP}</p>
+        </section>
+      )}
 
       {!finished && (
         <section>
@@ -422,6 +479,8 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
         </ul>
         {events.length === 0 && <p className="muted">Pulsa «Jugar» para empezar.</p>}
       </section>
+      </div>
+      </div>
     </div>
   );
 }

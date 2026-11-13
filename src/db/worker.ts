@@ -5,8 +5,10 @@
  */
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import { buildSave, readSave, type Manifest } from '../core/savefile';
-import { APP_VERSION, ENGINE_VERSION, TABLES, getSetting, migrate, schemaVersion, setSetting, transaction, type Db } from '../core/schema';
-import { ensureEconomy } from '../core/market';
+import { APP_VERSION, ENGINE_VERSION, TABLES, bumpRevision, getSetting, migrate, schemaVersion, setSetting, transaction, type Db } from '../core/schema';
+import { assignClauses, ensureEconomy } from '../core/market';
+import * as TR from '../core/transfers';
+import * as AW from '../core/awards';
 import { setupWorld } from '../core/world';
 import * as M from '../core/market';
 import { COMP, advanceDay, chooseClub, createUniverse, getUniverse, prepareLive, setLineup, startNewSeason, standings, type DayReport } from '../core/season';
@@ -14,6 +16,9 @@ import { simulateGame, type Intervention } from '../core/engine';
 import type { Level, Role, Tactics } from '../core/engine';
 import * as Q from '../core/queries';
 import * as W from '../core/world';
+import * as C from '../core/coach';
+import { POSITIONS, type Pos, overallAt } from '../core/attributes';
+import { archetype } from '../core/archetype';
 import { createRealUniverse, readSuperManagerZip, realSummary, type RealData } from '../core/importer';
 import { wrapDb } from './adapter';
 import type { AdvanceResult, ImportReport, LoadResult, Status } from './protocol';
@@ -53,6 +58,7 @@ function openMain() {
   transaction(db, () => {
     setupWorld(db);
     ensureEconomy(db);
+    assignClauses(db);
   });
 }
 
@@ -336,7 +342,10 @@ const ops: Record<string, (a: any) => unknown> = {
     if (!live) return null;
     const { game, userSide, people, clubs, home, away, options } = live;
     const season = getUniverse(db)!.game_season;
-    return { game, userSide, people, clubs, options, season, roster: [home.players.map((p) => p.id), away.players.map((p) => p.id)] };
+    // Media en cada puesto y arquetipo, para ordenar el banquillo al hacer un cambio.
+    const meta: Record<number, { atPos: number[]; arch: string }> = {};
+    for (const p of [...home.players, ...away.players]) meta[p.id] = { atPos: POSITIONS.map((pos) => overallAt(p.attrs, p, pos)), arch: archetype(p.attrs, p.pos1, p.height_cm).label };
+    return { game, userSide, people, clubs, options, season, meta, roster: [home.players.map((p) => p.id), away.players.map((p) => p.id)] };
   },
   liveSim: ({ interventions }: { interventions: Intervention[] }) => {
     if (!live) throw new Error('No hay partido en directo preparado.');
@@ -352,6 +361,23 @@ const ops: Record<string, (a: any) => unknown> = {
   },
   allPlayers: () => Q.allPlayers(db),
   office: ({ clubId }: { clubId: number }) => Q.office(db, clubId),
+  preview: ({ gameId }: { gameId?: number }) => Q.preview(db, gameId),
+  setTactics: ({ clubId, tactics }: { clubId: number; tactics: Tactics }) => {
+    transaction(db, () => {
+      db.exec('INSERT OR REPLACE INTO tactics (club_id, data) VALUES (?,?)', [clubId, JSON.stringify(tactics)]);
+      bumpRevision(db);
+    });
+    return Q.tactics(db, clubId);
+  },
+  tendencies: ({ id }: { id: number }) => C.playerTendencies(db, id),
+  setTendencies: ({ id, values }: { id: number; values: Record<string, number | null> }) => C.setTendencies(db, id, values),
+  setPositions: ({ id, pos1, pos2 }: { id: number; pos1: Pos; pos2: Pos | null }) => C.setPositions(db, id, pos1, pos2),
+  watch: ({ id, on }: { id: number; on: boolean }) => {
+    if (on) db.exec('INSERT OR IGNORE INTO watch (player_id, added_season) VALUES (?, (SELECT game_season FROM universe))', [id]);
+    else db.exec('DELETE FROM watch WHERE player_id = ?', [id]);
+    bumpRevision(db);
+    return on;
+  },
   setTraining: ({ clubId, training }: { clubId: number; training: W.Training }) => {
     W.setTraining(db, clubId, training);
     return Q.office(db, clubId);
@@ -365,11 +391,25 @@ const ops: Record<string, (a: any) => unknown> = {
   market: ({ id }: { id: number }) => M.marketInfo(db, id),
   offers: ({ id }: { id: number }) => M.offersFor(db, id),
   finances: ({ clubId }: { clubId: number }) => M.finances(db, clubId),
-  sign: ({ clubId, id, salary, years }: { clubId: number; id: number; salary: number; years: number }) => M.signFreeAgent(db, clubId, id, salary, years),
-  buy: ({ clubId, id, fee, salary, years }: { clubId: number; id: number; fee: number; salary: number; years: number }) => M.buyPlayer(db, clubId, id, fee, salary, years),
+  sign: ({ clubId, id, salary, years, clause }: { clubId: number; id: number; salary: number; years: number; clause?: number | null }) => M.signFreeAgent(db, clubId, id, salary, years, clause ?? null),
+  buy: ({ clubId, id, fee, salary, years, clause }: { clubId: number; id: number; fee: number; salary: number; years: number; clause?: number | null }) => M.buyPlayer(db, clubId, id, fee, salary, years, clause ?? null),
+  marketOverview: () => TR.marketOverview(db),
+  awards: ({ season }: { season?: number }) => {
+    const seasons = AW.awardSeasons(db);
+    const sel = season ?? seasons[0] ?? getUniverse(db)!.game_season;
+    return { seasons, season: sel, rows: AW.awardsView(db, sel) };
+  },
+  records: () => AW.records(db),
+  clubHistory: ({ clubId }: { clubId: number }) => AW.clubHistory(db, clubId),
+  youthReport: ({ maxAge }: { maxAge?: number }) => AW.youthReport(db, maxAge ?? 21),
+  scout: ({ id, clubId }: { id: number; clubId: number }) => AW.scoutPlayer(db, id, clubId),
+  signYouth: ({ id, clubId }: { id: number; clubId: number }) => AW.signYouth(db, id, clubId),
+  respondOffer: ({ id, action, ask }: { id: number; action: 'aceptar' | 'rechazar' | 'subir'; ask?: number }) => TR.respondOffer(db, id, action, ask),
+  tradeValue: (p: TR.TradeProposal) => TR.tradeValue(db, p),
+  proposeTrade: (p: TR.TradeProposal) => TR.proposeTrade(db, p),
   sell: ({ id, toClub }: { id: number; toClub: number }) => M.sellPlayer(db, id, toClub),
   release: ({ id }: { id: number }) => M.releasePlayer(db, id),
-  renew: ({ id, salary, years }: { id: number; salary: number; years: number }) => M.renewPlayer(db, id, salary, years),
+  renew: ({ id, salary, years, clause }: { id: number; salary: number; years: number; clause?: number | null }) => M.renewPlayer(db, id, salary, years, clause ?? null),
   clubs: () => Q.listClubs(db),
   chooseClub: ({ clubId }: { clubId: number }) => {
     chooseClub(db, clubId);

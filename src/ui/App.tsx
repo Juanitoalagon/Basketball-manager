@@ -17,12 +17,24 @@ const num = (n: number) => n.toLocaleString('es-ES');
 type TabKey = 'home' | 'squad' | 'players' | 'games' | 'league' | 'data';
 type View = { kind: 'player'; id: number } | { kind: 'game'; id: number } | { kind: 'club'; id: number } | { kind: 'live' };
 
+/** Vuelve a una posición de la página cuando el contenido ya tiene altura suficiente (máx. 1,5 s). */
+function restoreScroll(y: number) {
+  const t0 = performance.now();
+  const step = () => {
+    window.scrollTo(0, y);
+    if (Math.abs(window.scrollY - y) > 2 && performance.now() - t0 < 1500) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
 export function App() {
   const [st, setSt] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>('home');
   const [stack, setStack] = useState<View[]>([]);
   const [log, setLog] = useState<DayReport[] | null>(null);
+  // Posición de desplazamiento de cada nivel de la pila, para volver al mismo sitio.
+  const scrolls = useRef<number[]>([]);
 
   const refresh = useCallback(async () => {
     try {
@@ -46,11 +58,18 @@ export function App() {
 
   // El botón «atrás» del móvil cierra la pantalla abierta en lugar de salir de la app.
   useEffect(() => {
-    const onPop = () => setStack((s) => s.slice(0, -1));
+    const onPop = () => {
+      setStack((s) => {
+        const next = s.slice(0, -1);
+        restoreScroll(scrolls.current[next.length] ?? 0);
+        return next;
+      });
+    };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
   const push = (v: View) => {
+    scrolls.current[stack.length] = window.scrollY;
     history.pushState({ v: stack.length + 1 }, '');
     setStack((s) => [...s, v]);
     window.scrollTo(0, 0);
