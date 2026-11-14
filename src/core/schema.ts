@@ -5,7 +5,7 @@ import { ATTR_KEYS } from './attributes';
  * Regla: nunca se edita una migración ya publicada; se añade otra al final.
  */
 
-export const APP_VERSION = '0.7.0';
+export const APP_VERSION = '0.9.0';
 export const FORMAT_VERSION = 1;
 /** Hasta la fase 3 no hay motor real: los partidos de prueba son sintéticos. */
 export const ENGINE_VERSION = '0.1';
@@ -337,6 +337,44 @@ MIGRATIONS.push({
   `,
 });
 
+MIGRATIONS.push({
+  version: 8,
+  name: 'caja para salarios, negociación que cede y lesiones curadas en verano',
+  sql: `
+    ALTER TABLE club ADD COLUMN budget_extra INTEGER NOT NULL DEFAULT 0; -- caja pasada a salarios esta temporada
+    ALTER TABLE negotiation ADD COLUMN give REAL NOT NULL DEFAULT 0;     -- cuánto ha cedido ya (fracción)
+    UPDATE player SET injury_games = MAX(0, injury_games - 40) WHERE (SELECT phase FROM universe LIMIT 1) = 'fin';
+    UPDATE player SET injury = NULL WHERE injury_games = 0;
+  `,
+});
+
+MIGRATIONS.push({
+  version: 9,
+  name: 'ligas extranjeras, NBA y NCAA, ingresos, promesas, peticiones de salida, quintetos y planes tácticos',
+  sql: `
+    ALTER TABLE game ADD COLUMN date TEXT;                     -- fecha propia (partidos de simulación rápida)
+    CREATE INDEX game_status ON game(season, status);
+    ALTER TABLE club_season_finance ADD COLUMN gate INTEGER NOT NULL DEFAULT 0;    -- taquilla
+    ALTER TABLE club_season_finance ADD COLUMN sponsor INTEGER NOT NULL DEFAULT 0; -- patrocinio
+    ALTER TABLE club_season_finance ADD COLUMN costs INTEGER NOT NULL DEFAULT 0;   -- gastos fijos
+    ALTER TABLE club ADD COLUMN gate INTEGER NOT NULL DEFAULT 0;                   -- taquilla de la temporada en curso
+    ALTER TABLE player ADD COLUMN wants_out INTEGER NOT NULL DEFAULT 0;            -- ha pedido salir
+    ALTER TABLE player ADD COLUMN unhappy INTEGER NOT NULL DEFAULT 0;              -- partidos seguidos descontento
+    ALTER TABLE player ADD COLUMN listed INTEGER NOT NULL DEFAULT 0;               -- en la lista de transferibles
+    ALTER TABLE player ADD COLUMN last_talk INTEGER;                               -- día de la última charla
+    CREATE TABLE promise (
+      player_id INTEGER PRIMARY KEY, club_id INTEGER NOT NULL, season INTEGER NOT NULL,
+      kind TEXT NOT NULL, minutes INTEGER NOT NULL, strikes INTEGER NOT NULL DEFAULT 0, broken INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE lineup_unit (
+      season INTEGER NOT NULL, club_id INTEGER NOT NULL, five TEXT NOT NULL,
+      sec INTEGER NOT NULL DEFAULT 0, pf INTEGER NOT NULL DEFAULT 0, pa INTEGER NOT NULL DEFAULT 0, games INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (season, club_id, five)
+    ) WITHOUT ROWID;
+    CREATE TABLE tactic_preset (club_id INTEGER NOT NULL, slot INTEGER NOT NULL, name TEXT NOT NULL, tactics TEXT NOT NULL, PRIMARY KEY (club_id, slot));
+  `,
+});
+
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
 
 export function schemaVersion(db: Db): number {
@@ -371,9 +409,10 @@ export const TABLES = [
   'game_team_box', 'game_player_box', 'game_shots', 'game_pbp', 'playoff_series', 'season_result',
   'player_season_stats', 'shot_zone_stats', 'import_batch', 'lineup', 'tactics', 'real_game_line', 'real_prediction', 'contract', 'transfer', 'news', 'club_season_finance', 'comp_group',
   'player_tendency', 'negotiation', 'market_offer', 'award', 'watch', 'scouted', 'player_training', 'loan', 'objective',
+  'promise', 'lineup_unit', 'tactic_preset',
 ] as const;
 /** Tablas de la partida (todas menos ajustes y migraciones): se vacían al crear un universo. */
-export const GAME_TABLES = ['player_training', 'loan', 'objective', 'player_tendency', 'negotiation', 'market_offer', 'award', 'watch', 'scouted', 'comp_group', 'lineup', 'tactics', 'real_game_line', 'real_prediction', 'contract', 'transfer', 'news', 'club_season_finance', 'shot_zone_stats', 'player_season_stats', 'season_result', 'playoff_series', 'game_pbp', 'game_shots', 'game_player_box', 'game_team_box', 'game', 'season', 'player_attributes', 'player', 'club', 'competition', 'universe', 'import_batch'];
+export const GAME_TABLES = ['promise', 'lineup_unit', 'tactic_preset', 'player_training', 'loan', 'objective', 'player_tendency', 'negotiation', 'market_offer', 'award', 'watch', 'scouted', 'comp_group', 'lineup', 'tactics', 'real_game_line', 'real_prediction', 'contract', 'transfer', 'news', 'club_season_finance', 'shot_zone_stats', 'player_season_stats', 'season_result', 'playoff_series', 'game_pbp', 'game_shots', 'game_player_box', 'game_team_box', 'game', 'season', 'player_attributes', 'player', 'club', 'competition', 'universe', 'import_batch'];
 
 export function getSetting(db: Db, key: string): string | null {
   return db.rows<{ value: string }>('SELECT value FROM settings WHERE key = ?', [key])[0]?.value ?? null;

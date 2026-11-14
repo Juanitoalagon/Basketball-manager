@@ -6,7 +6,7 @@ import { ATTRS, type AttrKey, type Attrs } from '../core/attributes';
 import { useEffect, useState } from 'react';
 import { DEFAULT_DEFENSE, DEFAULT_TACTICS, DEF_SYS, OFF_SYS, type DefFocus, type DefSystem, type Defense, type Level, type OffSystem, type Pace, TEND_INFO, TEND_KEYS, type Tactics, type TendKey } from '../core/engine';
 import { call } from '../db/client';
-import { Loading, Tabs, useData } from './kit';
+import { Loading, Tabs, useData, Toast } from './kit';
 
 export const LEVELS: [Level, string][] = [['menos', 'Menos'], ['normal', 'Normal'], ['mas', 'Más']];
 const KIND_LABEL: Record<string, string> = { rim: 'Cerca del aro', paint: 'Pintura', mid: 'Media distancia', three: 'Triples' };
@@ -42,6 +42,42 @@ export function SystemPicker<T extends string>({ value, onChange, table, fits }:
   );
 }
 
+type Preset = { slot: number; name: string; tactics: Tactics };
+/** Hasta tres planes con nombre («contra grandes», «cerrar partido»…) que se aplican con un toque. */
+export function PresetsPanel({ clubId, current, onApplied }: { clubId: number; current: Tactics; onApplied: (t: Tactics) => void }) {
+  const { data, reload } = useData<Preset[]>('presets', { clubId }, [clubId]);
+  const [name, setName] = useState('');
+  const [slot, setSlot] = useState(0);
+  if (!data) return null;
+  const free = [0, 1, 2].find((k) => !data.some((p) => p.slot === k)) ?? slot;
+  return (
+    <section className="presets">
+      <h3>Planes guardados</h3>
+      {data.length === 0 && <p className="muted small">Guarda tus tácticas como un plan con nombre para cambiarlas de golpe, también durante el partido en directo.</p>}
+      <ul className="plain">
+        {data.map((p) => (
+          <li key={p.slot} className="row tight" style={{ justifyContent: 'space-between' }}>
+            <span><b>{p.name}</b> <span className="muted small">{OFF_SYS[p.tactics.offense ?? 'equilibrado'].label} · {DEF_SYS[p.tactics.defense?.system ?? 'individual'].label}</span></span>
+            <span className="row tight">
+              <button onClick={async () => { const t = await call<Tactics | null>('applyPreset', { clubId, slot: p.slot }); if (t) onApplied(t); }}>Aplicar</button>
+              <button className="sec" aria-label={`Borrar ${p.name}`} onClick={async () => { await call('deletePreset', { clubId, slot: p.slot }); reload(); }}>✕</button>
+            </span>
+          </li>
+        ))}
+      </ul>
+      <div className="row tight">
+        <input type="text" placeholder="Nombre del plan" value={name} maxLength={24} onChange={(e) => setName(e.target.value)} aria-label="Nombre del plan" style={{ flex: 1, marginTop: 0 }} />
+        {data.length >= 3 && (
+          <select value={slot} onChange={(e) => setSlot(Number(e.target.value))} aria-label="Sustituir">
+            {data.map((p) => <option key={p.slot} value={p.slot}>Sustituir «{p.name}»</option>)}
+          </select>
+        )}
+        <button className="sec" onClick={async () => { await call('savePreset', { clubId, slot: data.length >= 3 ? slot : free, name: name || `Plan ${free + 1}`, tactics: current }); setName(''); reload(); }}>Guardar lo actual</button>
+      </div>
+    </section>
+  );
+}
+
 export function TacticsEditor({ clubId }: { clubId: number }) {
   const { data, error, reload } = useData<Tactics>('tactics', { clubId }, [clubId]);
   const fits = useData<Fits>('fits', { clubId }, [clubId]);
@@ -55,13 +91,14 @@ export function TacticsEditor({ clubId }: { clubId: number }) {
   const up = (x: Partial<Tactics>) => { setT({ ...t, ...x }); setMsg(null); };
   const upDef = (x: Partial<Defense>) => up({ defense: { ...def, ...x } });
   const save = async (v: Tactics) => {
-    await call('setTactics', { clubId, tactics: { ...v, defense: { ...v.defense!, mark: null, special: null, matchups: {} } } });
+    await call('setTactics', { clubId, tactics: { ...v, defense: { ...v.defense!, mark: null, special: data.defense?.special ?? null, matchups: data.defense?.matchups ?? {} } } });
     setMsg('Guardado. Se aplica desde el próximo partido; en directo puedes cambiarlo cuando quieras.');
     reload();
   };
   return (
     <div>
-      {msg && <p className="ok">{msg}</p>}
+      <Toast text={msg} />
+      <PresetsPanel clubId={clubId} current={t} onApplied={(x) => { setT({ ...DEFAULT_TACTICS, ...x, defense: { ...DEFAULT_DEFENSE, ...x.defense, mark: null } }); setMsg('Plan aplicado y guardado.'); }} />
       <section>
         <h3>Sistema de ataque</h3>
         <SystemPicker<OffSystem> value={t.offense ?? 'equilibrado'} onChange={(v) => up({ offense: v })} table={OFF_SYS} fits={fits.data?.off} />
@@ -154,7 +191,7 @@ export function TendencyEditor({ id, attrs, onSaved }: { id: number; attrs?: Att
         De 1 a 99: con qué frecuencia busca cada cosa. Las naturales salen de sus atributos (debajo de cada una).
         {data.editable ? ' Toca «Ajustar» para cambiar una; forzar a alguien a hacer lo que no le sale empeora su acierto.' : ' Solo puedes ajustar las de tus jugadores.'}
       </p>
-      {msg && <p className="ok">{msg}</p>}
+      <Toast text={msg} />
       {TEND_KEYS.map((k) => {
         const v = val(k);
         const nat = data.natural[k];

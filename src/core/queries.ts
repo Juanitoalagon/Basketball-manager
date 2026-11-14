@@ -6,6 +6,8 @@ import { COMP, type StandingRow, getUniverse, standings } from './season';
 import { type Db } from './schema';
 import { askSalary, marketValue } from './market';
 import { COMP_INFO } from './names';
+import { FAST_COMPS } from './leagues';
+import { promiseOf } from './promises';
 import { dateOfDay, leagueRoundPlayed } from './calendar';
 import { expectedRole } from './club';
 import { archetype, archetypes } from './archetype';
@@ -178,7 +180,9 @@ export function allPlayers(db: Db) {
       if (!prev || l.gp > prev.gp) lines.set(l.id, l);
     }
   }
-  // Jugadores de clubes extranjeros: sus números en Europa.
+  // Ligas extranjeras, NBA y NCAA (simulación rápida): su liga regular.
+  for (const comp of FAST_COMPS) for (const l of playerLines(db, u.game_season, comp, 'regular')) if (!lines.has(l.id)) lines.set(l.id, l);
+  // Jugadores de clubes extranjeros sin partidos de liga todavía: sus números en Europa.
   for (const comp of [4, 5, 6]) for (const l of playerLines(db, u.game_season, comp, 'all')) if (!lines.has(l.id)) lines.set(l.id, l);
   const rows = db.rows<{ id: number; name: string; club_id: number | null; club: string | null; comp: number | null; country: string | null; pos1: string; pos2: string | null; birth_year: number; height_cm: number; nationality: string; potential_est: number; morale: number; injury_games: number; ovr: number; salary: number | null; until: number | null }>(
     `SELECT p.id, p.name, p.club_id, c.short AS club, c.competition_id AS comp, c.country, p.pos1, p.pos2, p.birth_year, p.height_cm, p.nationality, p.potential_est, p.morale, p.injury_games,
@@ -197,6 +201,8 @@ export function allPlayers(db: Db) {
       height_cm: r.height_cm, nationality: r.nationality, potential_est: r.potential_est, morale: r.morale, injury_games: r.injury_games, ovr: r.ovr,
       salary: r.salary, until: r.until, clause: r.clause, watched: !!r.watched,
       archetype: archetype(attrs, r.pos1 as Pos, r.height_cm).label,
+      archs: archetypes(attrs, r.pos1 as Pos, r.height_cm).map((x) => x.key),
+      attrs,
       age: econ.age, ask: askSalary(econ), value: marketValue(econ, r.until === null ? 0 : r.until - u.game_season), line: lines.get(r.id) ?? null,
     };
   });
@@ -255,11 +261,11 @@ export interface GameListRow {
   ot: number; status: string; series_id: number | null; round: number | null;
 }
 const GAME_LIST_SQL = `SELECT g.id, g.season, g.day, g.stage, g.competition_id, g.home_id, g.away_id, h.name AS home, a.name AS away,
-  h.short AS home_short, a.short AS away_short, g.home_pts, g.away_pts, g.ot, g.status, g.series_id, g.round
+  h.short AS home_short, a.short AS away_short, g.home_pts, g.away_pts, g.ot, g.status, g.series_id, g.round, g.date AS gdate
   FROM game g JOIN club h ON h.id = g.home_id JOIN club a ON a.id = g.away_id`;
 
 export function clubSchedule(db: Db, clubId: number, season: number): (GameListRow & { date: string | null })[] {
-  return db.rows<GameListRow>(GAME_LIST_SQL + ' WHERE g.season = ? AND (g.home_id = ? OR g.away_id = ?) ORDER BY g.day', [season, clubId, clubId]).map((g) => ({ ...g, date: dateOfDay(season, g.day) }));
+  return db.rows<GameListRow>(GAME_LIST_SQL + ' WHERE g.season = ? AND (g.home_id = ? OR g.away_id = ?) ORDER BY g.day', [season, clubId, clubId]).map((g) => ({ ...g, date: (g as { gdate?: string | null }).gdate ?? dateOfDay(season, g.day) }));
 }
 
 export function dayGames(db: Db, season: number, comp: number, day: number): GameListRow[] {
@@ -268,16 +274,16 @@ export function dayGames(db: Db, season: number, comp: number, day: number): Gam
 
 export function compDays(db: Db, season: number, comp: number): { day: number; stage: string; played: number; total: number; round: number | null; date: string | null }[] {
   return db.rows<{ day: number; stage: string; played: number; total: number; round: number | null }>(
-    "SELECT day, MIN(stage) AS stage, SUM(status = 'jugado') AS played, COUNT(*) AS total, MIN(round) AS round FROM game WHERE season = ? AND competition_id = ? GROUP BY day ORDER BY day",
+    "SELECT day, MIN(stage) AS stage, SUM(status = 'jugado') AS played, COUNT(*) AS total, MIN(round) AS round, MIN(date) AS gdate FROM game WHERE season = ? AND competition_id = ? GROUP BY day ORDER BY day",
     [season, comp],
-  ).map((d) => ({ ...d, round: d.stage === 'regular' || d.stage === 'grupos' ? d.round : null, date: dateOfDay(season, d.day) }));
+  ).map((d) => ({ ...d, round: d.stage === 'regular' || d.stage === 'grupos' ? d.round : null, date: (d as { gdate?: string | null }).gdate ?? dateOfDay(season, d.day) }));
 }
 
 export function squad(db: Db, clubId: number, season: number) {
   const comp = compOfClub(db, clubId);
   const lines = new Map(playerLines(db, season, comp, 'regular', clubId).map((l) => [l.id, l]));
-  const players = db.rows<{ id: number; name: string; number: number | null; nationality: string; birth_year: number; youth: number; origin: string; height_cm: number; pos1: Pos; pos2: Pos | null; potential_est: number; ovr: number; morale: number; injury_games: number; injury: string | null; salary: number | null; until: number | null }>(
-    `SELECT p.id, p.name, p.number, p.nationality, p.birth_year, p.youth, p.origin, a.*, p.height_cm, p.pos1, p.pos2, p.potential_est, a.ovr, p.morale, p.injury_games, p.injury, k.salary, k.until
+  const players = db.rows<{ id: number; name: string; number: number | null; nationality: string; birth_year: number; youth: number; origin: string; height_cm: number; pos1: Pos; pos2: Pos | null; potential_est: number; ovr: number; morale: number; injury_games: number; injury: string | null; salary: number | null; until: number | null; wants_out: number; listed: number }>(
+    `SELECT p.id, p.name, p.number, p.nationality, p.birth_year, p.youth, p.origin, a.*, p.height_cm, p.pos1, p.pos2, p.potential_est, a.ovr, p.morale, p.injury_games, p.injury, k.salary, k.until, p.wants_out, p.listed
      FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ? LEFT JOIN contract k ON k.player_id = p.id
      WHERE p.club_id = ? AND p.retired = 0 ORDER BY a.ovr DESC`,
     [season, clubId],
@@ -291,7 +297,7 @@ export function squad(db: Db, clubId: number, season: number) {
     players: players.map((p) => {
       const r = p as unknown as Record<string, number>;
       const attrs = Object.fromEntries(ATTR_KEYS.map((k) => [k, Number(r[k])])) as Attrs;
-      const o: Record<string, unknown> = { id: p.id, name: p.name, number: p.number, nationality: p.nationality, birth_year: p.birth_year, youth: p.youth, origin: p.origin, height_cm: p.height_cm, pos1: p.pos1, pos2: p.pos2, potential_est: p.potential_est, ovr: p.ovr, morale: p.morale, injury_games: p.injury_games, injury: p.injury, salary: p.salary, until: p.until };
+      const o: Record<string, unknown> = { id: p.id, name: p.name, number: p.number, nationality: p.nationality, birth_year: p.birth_year, youth: p.youth, origin: p.origin, height_cm: p.height_cm, pos1: p.pos1, pos2: p.pos2, potential_est: p.potential_est, ovr: p.ovr, morale: p.morale, injury_games: p.injury_games, injury: p.injury, salary: p.salary, until: p.until, wants_out: p.wants_out, listed: p.listed };
       return { ...(o as typeof p), age: season - p.birth_year, archetype: archetype(attrs, p.pos1, p.height_cm), line: lines.get(p.id) ?? null };
     }),
   };
@@ -319,8 +325,15 @@ export function playerDetail(db: Db, id: number) {
   const career = seasonsRows.map((s) => {
     const l = playerLines(db, s.season, s.competition_id, s.stage, s.club_id).find((x) => x.id === id)!;
     const comp = db.rows<{ short: string }>('SELECT short FROM competition WHERE id = ?', [s.competition_id])[0]!.short;
-    return { season: s.season, comp, stage: s.stage, source: 'sim' as const, line: l };
+    const club = db.rows<{ name: string; short: string; colors: string | null }>('SELECT name, short, colors FROM club WHERE id = ?', [s.club_id])[0];
+    return { season: s.season, comp, competition_id: s.competition_id, stage: s.stage, source: 'sim' as const, line: l, club_id: s.club_id, club: club?.name ?? '¿?', club_short: club?.short ?? '', club_colors: club?.colors ?? null };
   });
+  // Trayectoria: cada movimiento registrado (fichajes, traspasos, cesiones, rescisiones, renovaciones).
+  const moves = db.rows<{ season: number; day: number; kind: string; fee: number; from_club: number | null; to_club: number | null; from_name: string | null; to_name: string | null }>(
+    `SELECT t.season, t.day, t.kind, t.fee, t.from_club, t.to_club, cf.name AS from_name, ct.name AS to_name FROM transfer t
+     LEFT JOIN club cf ON cf.id = t.from_club LEFT JOIN club ct ON ct.id = t.to_club WHERE t.player_id = ? ORDER BY t.id`,
+    [id],
+  );
   const gameLog = db.rows<Record<string, unknown>>(
     `SELECT g.id AS game_id, g.day, g.stage, g.home_id, g.away_id, g.home_pts, g.away_pts, h.short AS home_short, a.short AS away_short, b.*
      FROM game_player_box b JOIN game g ON g.id = b.game_id JOIN club h ON h.id = g.home_id JOIN club a ON a.id = g.away_id
@@ -335,6 +348,7 @@ export function playerDetail(db: Db, id: number) {
   return {
     archetypes: archetypes(attrs, p.pos1 as Pos, Number(p.height_cm)),
     watched: db.rows('SELECT 1 FROM watch WHERE player_id = ?', [id]).length > 0,
+    promise: promiseOf(db, id),
     mine: p.club_id !== null && Number(p.club_id) === u.user_club_id,
     awards: db.rows<{ season: number; competition_id: number; award: string; rank: number }>('SELECT season, competition_id, award, rank FROM award WHERE player_id = ? ORDER BY season DESC', [id]),
     tendencies: { natural: shotTendencies(attrs, Number(p.height_cm)), real: realTotal ? Object.fromEntries(Object.entries(real).map(([k, v]) => [k, v / realTotal])) : null, shots: realTotal },
@@ -347,6 +361,7 @@ export function playerDetail(db: Db, id: number) {
     prevAttrs: previous ? toAttrs(previous) : null,
     posOvr,
     career,
+    moves,
     gameLog,
     shotSeasons: db.rows<{ season: number }>('SELECT DISTINCT season FROM shot_zone_stats WHERE player_id = ? ORDER BY season DESC', [id]).map((r) => r.season),
   };
@@ -398,7 +413,7 @@ export function decodeShots(db: Db, gameId: number): Shot[] {
 export function gameDetail(db: Db, id: number) {
   const g = db.rows<GameListRow & { comp: string }>(GAME_LIST_SQL.replace('FROM game g', ', k.short AS comp FROM game g JOIN competition k ON k.id = g.competition_id') + ' WHERE g.id = ?', [id])[0] as (GameListRow & { comp: string; date?: string | null }) | undefined;
   if (!g) throw new Error('Partido no encontrado.');
-  g.date = dateOfDay(g.season, g.day);
+  g.date = (g as { gdate?: string | null }).gdate ?? dateOfDay(g.season, g.day);
   const teams = db.rows<Record<string, number>>('SELECT * FROM game_team_box WHERE game_id = ?', [id]);
   const players = db.rows<Record<string, unknown>>(
     'SELECT b.*, p.name, p.number, p.pos1 FROM game_player_box b JOIN player p ON p.id = b.player_id WHERE b.game_id = ? ORDER BY b.gs DESC, b.sec DESC',

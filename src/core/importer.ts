@@ -327,6 +327,7 @@ export function createRealUniverse(db: Db, data: RealData, opts: { name: string;
     ensureEconomy(db);
     seasonSetup(db, season, null, new Rng(opts.seed + 4711));
     db.exec("INSERT INTO settings(key, value) VALUES ('revision', '0') ON CONFLICT(key) DO UPDATE SET value = '0'");
+    db.exec("INSERT OR REPLACE INTO settings(key, value) VALUES ('econ', '2')");
   });
   return getUniverse(db)!;
 }

@@ -7,7 +7,8 @@ import type { Attrs, AttrKey, Pos } from './attributes';
 
 export type ArchetypeKey =
   | 'anotador' | 'tirador' | '3d' | 'director' | 'penetrador' | 'defensor' | 'protector'
-  | 'reboteador' | 'poste' | 'abierto' | 'todoterreno' | 'rol';
+  | 'reboteador' | 'poste' | 'abierto' | 'todoterreno'
+  | 'pivotpasador' | 'media' | 'atleta' | 'lider' | 'cerrador' | 'rol';
 
 export interface Archetype { key: ArchetypeKey; label: string; hint: string }
 
@@ -23,6 +24,11 @@ const DEF: Record<ArchetypeKey, { label: string; hint: string; keys: AttrKey[]; 
   poste: { label: 'Poste bajo', hint: 'Juega de espaldas y castiga cerca del aro', keys: ['post', 'post', 'str', 'fin'], thr: 66, ok: (_a, p) => p === 'PF' || p === 'C' || p === 'SF' },
   abierto: { label: 'Pívot abierto', hint: 'Interior que abre el campo con su tiro', keys: ['sht3', 'sht2', 'offb'], thr: 57, ok: (_a, p) => p === 'PF' || p === 'C' },
   todoterreno: { label: 'Todoterreno', hint: 'Aporta en ataque y en defensa', keys: ['cre', 'sht2', 'pas', 'perd', 'intd', 'dreb', 'iq'], thr: 60, ok: (a) => Math.min(a.perd, a.sht2, a.pas) >= 52 },
+  pivotpasador: { label: 'Pívot pasador', hint: 'Interior que reparte desde el poste alto: pase, visión e IQ', keys: ['pas', 'vis', 'iq', 'post'], thr: 52, ok: (a, p) => (p === 'PF' || p === 'C') && a.pas >= 50 },
+  media: { label: 'Tirador de media', hint: 'Castiga la media distancia tras bote o bloqueo', keys: ['sht2', 'sht2', 'cre', 'cons'], thr: 62, ok: (a) => a.sht2 >= 64 },
+  atleta: { label: 'Atleta', hint: 'Velocidad, salto y resistencia por encima de todos', keys: ['spd', 'jmp', 'agi', 'sta'], thr: 64 },
+  lider: { label: 'Líder', hint: 'Veterano que ordena al equipo: liderazgo, experiencia e IQ', keys: ['lead', 'exp', 'iq', 'disc'], thr: 62, ok: (a) => a.lead >= 64 },
+  cerrador: { label: 'Cerrador', hint: 'Quiere el balón en los finales: sangre fría y creación', keys: ['clutch', 'clutch', 'cre', 'ft'], thr: 63, ok: (a) => a.clutch >= 66 },
   rol: { label: 'Jugador de rol', hint: 'Sin una especialidad clara', keys: [], thr: 0 },
 };
 

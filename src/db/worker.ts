@@ -6,7 +6,11 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import { buildSave, readSave, type Manifest } from '../core/savefile';
 import { APP_VERSION, ENGINE_VERSION, TABLES, bumpRevision, getSetting, migrate, schemaVersion, setSetting, transaction, type Db } from '../core/schema';
-import { assignClauses, ensureEconomy } from '../core/market';
+import { assignClauses, ensureEconomy, rescaleEconomy } from '../core/market';
+import * as PR from '../core/promises';
+import * as SC from '../core/scouting';
+import { seasonSummary } from '../core/summary';
+import type { PromiseTerms } from '../core/promises';
 import * as TR from '../core/transfers';
 import * as AW from '../core/awards';
 import * as CL from '../core/club';
@@ -59,6 +63,7 @@ function openMain() {
   // Partidas de versiones anteriores: crear contratos y presupuestos que no existían.
   // Partidas de versiones anteriores: añade clubes europeos, colores, cantera y contratos que falten.
   transaction(db, () => {
+    rescaleEconomy(db);
     migrateCalendar(db);
     setupWorld(db);
     ensureEconomy(db);
@@ -357,8 +362,8 @@ const ops: Record<string, (a: any) => unknown> = {
     const { game, userSide, people, clubs, home, away, options } = live;
     const season = getUniverse(db)!.game_season;
     // Media en cada puesto y arquetipo, para ordenar el banquillo al hacer un cambio.
-    const meta: Record<number, { atPos: number[]; arch: string }> = {};
-    for (const p of [...home.players, ...away.players]) meta[p.id] = { atPos: POSITIONS.map((pos) => overallAt(p.attrs, p, pos)), arch: archetype(p.attrs, p.pos1, p.height_cm).label };
+    const meta: Record<number, { atPos: number[]; arch: string; pos2: string | null; perd: number; intd: number }> = {};
+    for (const p of [...home.players, ...away.players]) meta[p.id] = { atPos: POSITIONS.map((pos) => overallAt(p.attrs, p, pos)), arch: archetype(p.attrs, p.pos1, p.height_cm).label, pos2: p.pos2 ?? null, perd: p.attrs.perd, intd: p.attrs.intd };
     return { game, userSide, people, clubs, options, season, meta, roster: [home.players.map((p) => p.id), away.players.map((p) => p.id)] };
   },
   liveSim: ({ interventions }: { interventions: Intervention[] }) => {
@@ -405,8 +410,8 @@ const ops: Record<string, (a: any) => unknown> = {
   market: ({ id }: { id: number }) => M.marketInfo(db, id),
   offers: ({ id }: { id: number }) => M.offersFor(db, id),
   finances: ({ clubId }: { clubId: number }) => M.finances(db, clubId),
-  sign: ({ clubId, id, salary, years, clause }: { clubId: number; id: number; salary: number; years: number; clause?: number | null }) => M.signFreeAgent(db, clubId, id, salary, years, clause ?? null),
-  buy: ({ clubId, id, fee, salary, years, clause }: { clubId: number; id: number; fee: number; salary: number; years: number; clause?: number | null }) => M.buyPlayer(db, clubId, id, fee, salary, years, clause ?? null),
+  sign: ({ clubId, id, salary, years, clause, promise }: { clubId: number; id: number; salary: number; years: number; clause?: number | null; promise?: PromiseTerms | null }) => M.signFreeAgent(db, clubId, id, salary, years, clause ?? null, promise ?? null),
+  buy: ({ clubId, id, fee, salary, years, clause, promise }: { clubId: number; id: number; fee: number; salary: number; years: number; clause?: number | null; promise?: PromiseTerms | null }) => M.buyPlayer(db, clubId, id, fee, salary, years, clause ?? null, promise ?? null),
   marketOverview: () => TR.marketOverview(db),
   inbox: ({ clubId }: { clubId: number }) => Q.inbox(db, clubId),
   analysis: ({ id, season }: { id: number; season?: number }) => Q.playerAnalysis(db, id, season ?? getUniverse(db)!.game_season),
@@ -429,9 +434,10 @@ const ops: Record<string, (a: any) => unknown> = {
     return { ...c, payroll: M.payroll(db, clubId), objective: CL.objectiveOf(db, u.game_season, clubId), last: CL.objectiveOf(db, u.game_season - 1, clubId) };
   },
   money: ({ clubId }: { clubId: number }) => {
-    const c = db.rows<{ cash: number; budget: number }>('SELECT cash, budget FROM club WHERE id = ?', [clubId])[0]!;
-    return { cash: c.cash, budget: c.budget, payroll: M.payroll(db, clubId) };
+    const c = db.rows<{ cash: number; budget: number; budget_extra: number }>('SELECT cash, budget, budget_extra FROM club WHERE id = ?', [clubId])[0]!;
+    return { cash: c.cash, budget: c.budget, extra: c.budget_extra, payroll: M.payroll(db, clubId) };
   },
+  moveCash: ({ clubId, amount }: { clubId: number; amount: number }) => M.moveCash(db, clubId, amount),
   awards: ({ season }: { season?: number }) => {
     const seasons = AW.awardSeasons(db);
     const sel = season ?? seasons[0] ?? getUniverse(db)!.game_season;
@@ -447,7 +453,16 @@ const ops: Record<string, (a: any) => unknown> = {
   proposeTrade: (p: TR.TradeProposal) => TR.proposeTrade(db, p),
   sell: ({ id, toClub }: { id: number; toClub: number }) => M.sellPlayer(db, id, toClub),
   release: ({ id }: { id: number }) => M.releasePlayer(db, id),
-  renew: ({ id, salary, years, clause }: { id: number; salary: number; years: number; clause?: number | null }) => M.renewPlayer(db, id, salary, years, clause ?? null),
+  renew: ({ id, salary, years, clause, promise }: { id: number; salary: number; years: number; clause?: number | null; promise?: PromiseTerms | null }) => M.renewPlayer(db, id, salary, years, clause ?? null, promise ?? null),
+  scoutRival: ({ gameId }: { gameId: number }) => SC.scoutRival(db, gameId),
+  applyAdvice: ({ clubId, advice }: { clubId?: number; advice: SC.Advice }) => SC.applyAdvice(db, clubId ?? getUniverse(db)!.user_club_id!, advice),
+  units: ({ clubId }: { clubId: number }) => SC.lineupUnits(db, clubId, getUniverse(db)!.game_season),
+  presets: ({ clubId }: { clubId: number }) => SC.presets(db, clubId),
+  savePreset: ({ clubId, slot, name, tactics }: { clubId: number; slot: number; name: string; tactics: Tactics }) => SC.savePreset(db, clubId, slot, name, tactics),
+  deletePreset: ({ clubId, slot }: { clubId: number; slot: number }) => SC.deletePreset(db, clubId, slot),
+  applyPreset: ({ clubId, slot }: { clubId: number; slot: number }) => SC.applyPreset(db, clubId, slot),
+  seasonSummary: ({ season }: { season?: number }) => seasonSummary(db, season),
+  request: ({ id, action, minutes }: { id: number; action: 'vender' | 'prometer' | 'hablar' | 'quitar'; minutes?: number }) => PR.handleRequest(db, id, action, minutes),
   clubs: () => Q.listClubs(db),
   chooseClub: ({ clubId }: { clubId: number }) => {
     chooseClub(db, clubId);

@@ -4,7 +4,7 @@ import type * as AW from '../core/awards';
 import { COMP_INFO } from '../core/names';
 import { call } from '../db/client';
 import { Face } from './Face';
-import { CupoTag, Loading, type Nav, Tabs, f1, seasonLabel, shortName, useData, useSticky } from './kit';
+import { CupoTag, Loading, type Nav, Tabs, f1, seasonLabel, shortName, useData, useSticky, Toast } from './kit';
 import { eur } from './market';
 
 const AWARD_LABEL: Record<string, string> = {
@@ -199,7 +199,7 @@ export function YouthReport({ nav, myClub }: { nav: Nav; myClub: number }) {
           </select>
         </div>
       </section>
-      {msg && <p className={msg.ok ? 'ok' : 'error'}>{msg.message}</p>}
+      <Toast text={msg?.message} ok={msg?.ok ?? true} />
       <section>
         {rows.map((r) => (
           <div key={r.id} className="youth">

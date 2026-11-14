@@ -196,4 +196,11 @@ export const COMP_INFO: Record<number, { name: string; short: string; kind: stri
   4: { name: 'EuroLeague', short: 'EL', kind: 'europea' },
   5: { name: 'EuroCup', short: 'EC', kind: 'europea' },
   6: { name: 'Basketball Champions League', short: 'BCL', kind: 'europea' },
+  7: { name: 'Betclic ÉLITE (Francia)', short: 'FRA', kind: 'extranjera' },
+  8: { name: 'Serie A (Italia)', short: 'ITA', kind: 'extranjera' },
+  9: { name: 'BBL (Alemania)', short: 'GER', kind: 'extranjera' },
+  10: { name: 'Süper Ligi (Turquía)', short: 'TUR', kind: 'extranjera' },
+  11: { name: 'Basket League (Grecia)', short: 'GRE', kind: 'extranjera' },
+  12: { name: 'NBA', short: 'NBA', kind: 'extranjera' },
+  13: { name: 'NCAA', short: 'NCAA', kind: 'extranjera' },
 };

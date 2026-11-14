@@ -27,11 +27,11 @@ describe('calendario', () => {
     createUniverse(db, { name: 'C', seed: 5, id: 'c' });
     chooseClub(db, 3);
     // Simula el calendario viejo: liga en el día = jornada y Europa en días pares.
-    db.exec("UPDATE game SET day = round WHERE stage = 'regular'");
+    db.exec("UPDATE game SET day = round WHERE stage = 'regular' AND competition_id <= 2");
     db.exec("UPDATE game SET day = round * 2 WHERE stage = 'grupos'");
     setSetting(db, 'calendar', '1');
     migrateCalendar(db);
-    const clash = db.rows<{ n: number }>(`SELECT COUNT(*) AS n FROM (SELECT day, c, COUNT(*) k FROM (SELECT day, home_id AS c FROM game UNION ALL SELECT day, away_id FROM game) GROUP BY day, c HAVING k > 1)`)[0]!.n;
+    const clash = db.rows<{ n: number }>(`SELECT COUNT(*) AS n FROM (SELECT day, c, COUNT(*) k FROM (SELECT day, home_id AS c FROM game WHERE competition_id <= 6 UNION ALL SELECT day, away_id FROM game WHERE competition_id <= 6) GROUP BY day, c HAVING k > 1)`)[0]!.n;
     expect(clash).toBe(0);
     for (let i = 0; i < 6; i++) advanceDay(db);
     expect(db.rows<{ n: number }>("SELECT COUNT(*) AS n FROM game WHERE status = 'jugado'")[0]!.n).toBeGreaterThan(0);

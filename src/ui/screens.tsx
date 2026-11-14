@@ -1,5 +1,10 @@
 /** Pantallas del juego: inicio, plantilla, ficha de jugador, partidos, hoja de partido y liga. */
 import React, { useEffect, useMemo, useState } from 'react';
+import { CareerView, type CareerRow } from './career';
+import { UnitsView } from './units';
+import { SeasonSummary } from './summary';
+import { PO_SIZE } from '../core/leagues';
+import { RequestPanel } from './inbox';
 import { ATTRS, GROUP_LABEL, POS_LABEL, type AttrGroup, type Pos } from '../core/attributes';
 import { ZONES } from '../core/court';
 import { EV } from '../core/engine';
@@ -20,7 +25,7 @@ import { BoardCard, InboxPanel } from './inbox';
 import { AnalysisView, EvolutionView } from './analysis';
 import { TacticsEditor, TendencyEditor } from './tactics';
 import { PreviewView } from './preview';
-import { Back, type Col, CupoSummary, CupoTag, Loading, type Nav, POS_ORDER, Table, Tabs, Tag, clock, posSort, shortName, useSticky, f0, f1, f2, mins, pc, pcRaw, seasonLabel, signed, useData } from './kit';
+import { Back, type Col, CupoSummary, CupoTag, Loading, type Nav, POS_ORDER, Table, Tabs, Tag, clock, posSort, shortName, useSticky, f0, f1, f2, mins, pc, pcRaw, seasonLabel, signed, useData, Toast } from './kit';
 
 type HomeData = NonNullable<ReturnType<typeof Q.home>> & { club: NonNullable<ReturnType<typeof Q.home>>['club'] };
 type GameRow = Q.GameListRow;
@@ -133,10 +138,8 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
       </section>
 
       {err && <p className="error">{err}</p>}
-      <MoneyBar clubId={data.club.id} />
-      <InboxPanel clubId={data.club.id} nav={nav} />
-
-      <section>
+      {u.phase === 'fin' && <SeasonSummary nav={nav} />}
+      <section className="nextmatch">
         <h3>Próximo partido</h3>
         {data.next ? (
           <p className="tap" onClick={() => nav.club(data.next!.home_id === data.club!.id ? data.next!.away_id : data.next!.home_id)}>
@@ -204,6 +207,8 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
         </section>
       )}
 
+      <MoneyBar clubId={data.club.id} />
+      <InboxPanel clubId={data.club.id} nav={nav} />
       <MarketBanner nav={nav} />
 
       <section>
@@ -247,13 +252,13 @@ type SquadRow = SquadData['players'][number];
 type Group = 'basic' | 'shoot' | 'adv' | 'bio';
 
 export function SquadScreen({ clubId, nav, isMine, onBack }: { clubId: number; nav: Nav; isMine: boolean; onBack?: () => void }) {
-  type V = 'plantilla' | 'quinteto' | 'tacticas' | 'entreno' | 'cantera' | 'finanzas' | 'historia';
+  type V = 'plantilla' | 'quinteto' | 'quintetos' | 'tacticas' | 'entreno' | 'cantera' | 'finanzas' | 'historia';
   const [view, setView] = useSticky<V>('squad.view', 'plantilla');
   if (isMine && !onBack) {
     return (
       <div>
-        <Tabs<V> value={view} onChange={setView} options={[['plantilla', 'Plantilla'], ['quinteto', 'Quinteto'], ['tacticas', 'Tácticas'], ['entreno', 'Entreno'], ['cantera', 'Cantera'], ['finanzas', 'Finanzas'], ['historia', 'Historia']]} />
-        {view === 'plantilla' ? <SquadTable clubId={clubId} nav={nav} /> : view === 'quinteto' ? <LineupEditor clubId={clubId} nav={nav} /> : view === 'tacticas' ? <TacticsEditor clubId={clubId} /> : view === 'entreno' ? <><TrainingScreen clubId={clubId} /><IndividualTraining clubId={clubId} nav={nav} /></> : view === 'cantera' ? <YouthScreen clubId={clubId} nav={nav} /> : view === 'historia' ? <ClubHistory clubId={clubId} nav={nav} /> : <FinanceScreen clubId={clubId} nav={nav} />}
+        <Tabs<V> value={view} onChange={setView} options={[['plantilla', 'Plantilla'], ['quinteto', 'Quinteto'], ['quintetos', 'Quintetos +/-'], ['tacticas', 'Tácticas'], ['entreno', 'Entreno'], ['cantera', 'Cantera'], ['finanzas', 'Finanzas'], ['historia', 'Historia']]} />
+        {view === 'plantilla' ? <SquadTable clubId={clubId} nav={nav} /> : view === 'quinteto' ? <LineupEditor clubId={clubId} nav={nav} /> : view === 'quintetos' ? <UnitsView clubId={clubId} nav={nav} /> : view === 'tacticas' ? <TacticsEditor clubId={clubId} /> : view === 'entreno' ? <><TrainingScreen clubId={clubId} /><IndividualTraining clubId={clubId} nav={nav} /></> : view === 'cantera' ? <YouthScreen clubId={clubId} nav={nav} /> : view === 'historia' ? <ClubHistory clubId={clubId} nav={nav} /> : <FinanceScreen clubId={clubId} nav={nav} />}
       </div>
     );
   }
@@ -287,7 +292,7 @@ function SquadTable({ clubId, nav, onBack, tabs }: { clubId: number; nav: Nav; o
     render: (r) => (
       <span className="pname">
         {r.origin !== 'real' && <Face id={r.id} nationality={r.nationality} age={r.age} colors={data.club.colors} size={22} />}
-        <span><span className="num">{r.number ?? ''}</span> {spanish && <CupoTag nationality={r.nationality} />} {shortName(r.name)}{r.injury_games > 0 && <span className="bad" title={r.injury ?? ''}> ✚</span>}</span>
+        <span><span className="num">{r.number ?? ''}</span> {spanish && <CupoTag nationality={r.nationality} />} {shortName(r.name)}{r.injury_games > 0 && <span className="bad" title={r.injury ?? ''}> ✚</span>}{r.wants_out ? <span title="Pide salir"> 😠</span> : r.listed ? <span title="Transferible"> 📋</span> : null}</span>
       </span>
     ),
   },
@@ -325,7 +330,6 @@ function SquadTable({ clubId, nav, onBack, tabs }: { clubId: number; nav: Nav; o
       { key: 'ows', label: 'OWS', value: (r) => L(r)?.ows ?? null, render: (r) => f1(L(r)?.ows) },
       { key: 'dws', label: 'DWS', value: (r) => L(r)?.dws ?? null, render: (r) => f1(L(r)?.dws) },
       { key: 'ws', label: 'WS', value: (r) => L(r)?.ws ?? null, render: (r) => f1(L(r)?.ws) },
-      { key: 'ws40', label: 'WS/40', value: (r) => L(r)?.ws40 ?? null, render: (r) => (L(r) ? f2(L(r)!.ws40) : '—') },
       { key: 'va', label: 'VA', title: 'Victorias añadidas sobre un jugador de reemplazo', value: (r) => L(r)?.va ?? null, render: (r) => f1(L(r)?.va) },
       { key: 'pm', label: '+/-', value: (r) => L(r)?.pm ?? null, render: (r) => (L(r) ? signed(L(r)!.pm) : '—') },
     ],
@@ -391,7 +395,7 @@ function PositionEditor({ id, pos1, pos2, posOvr, onDone }: { id: number; pos1: 
           onDone();
         }}>Cambiar</button>
       </div>
-      {msg && <p className="ok">{msg}</p>}
+      <Toast text={msg} />
     </div>
   );
 }
@@ -442,6 +446,7 @@ export function PlayerScreen({ id, nav, myClub, onChanged }: { id: number; nav: 
           <span>{p.hand === 'L' ? 'Zurdo' : 'Diestro'}</span>
         </div>
         {p.mood_note && <p className="small" style={{ margin: '6px 0 0' }}>Moral {String(p.morale)} · <span className="muted">{String(p.mood_note)}</span>{Number(p.fatigue) > 0.25 && <span className="warn"> · cansado ({Math.round(Number(p.fatigue) * 100)} %)</span>}</p>}
+        {data.mine && (Number(p.wants_out) > 0 || Number(p.listed) > 0 || data.promise) && <RequestPanel id={id} wantsOut={Number(p.wants_out) > 0} listed={Number(p.listed) > 0} promise={data.promise} onDone={reload} />}
         {p.origin === 'real'
           ? <p className="muted small">Jugador real <Tag kind="real" /> · atributos, edad y altura <Tag kind="est" /> · estadísticas del juego <Tag kind="sim" /></p>
           : <p className="muted small">Jugador generado <Tag kind="est" /> · estadísticas <Tag kind="sim" /></p>}
@@ -514,32 +519,7 @@ export function PlayerScreen({ id, nav, myClub, onChanged }: { id: number; nav: 
       )}
 
       {tab === 'stats' && (
-        <section>
-          <Table
-            cols={[
-              { key: 's', label: 'Temp.', left: true, value: (r) => r.season * 10 + (r.stage === 'playoffs' ? 1 : 0), render: (r) => `${seasonLabel(r.season)} ${r.comp}${r.stage === 'playoffs' ? ' PO' : ''}` },
-              { key: 'gp', label: 'PJ', value: (r) => r.line.gp },
-              { key: 'min', label: 'MIN', value: (r) => r.line.sec / r.line.gp, render: (r) => mins(r.line.sec, r.line.gp) },
-              { key: 'pts', label: 'PTS', value: (r) => r.line.pts / r.line.gp, render: (r) => f1(r.line.pts / r.line.gp) },
-              { key: 'reb', label: 'REB', value: (r) => reb(r.line) / r.line.gp, render: (r) => f1(reb(r.line) / r.line.gp) },
-              { key: 'ast', label: 'AST', value: (r) => r.line.ast / r.line.gp, render: (r) => f1(r.line.ast / r.line.gp) },
-              { key: 't2', label: 'T2%', value: (r) => (r.line.fga2 ? r.line.fgm2 / r.line.fga2 : null), render: (r) => pc(r.line.fga2 ? r.line.fgm2 / r.line.fga2 : null) },
-              { key: 't3', label: 'T3%', value: (r) => (r.line.fga3 ? r.line.fgm3 / r.line.fga3 : null), render: (r) => pc(r.line.fga3 ? r.line.fgm3 / r.line.fga3 : null) },
-              { key: 't1', label: 'T1%', value: (r) => (r.line.fta ? r.line.ftm / r.line.fta : null), render: (r) => pc(r.line.fta ? r.line.ftm / r.line.fta : null) },
-              { key: 'ts', label: 'TS%', value: (r) => r.line.ts, render: (r) => pc(r.line.ts) },
-              { key: 'usg', label: 'USG%', value: (r) => r.line.usg, render: (r) => pcRaw(r.line.usg) },
-              { key: 'pir', label: 'VAL', value: (r) => r.line.pir / r.line.gp, render: (r) => f1(r.line.pir / r.line.gp) },
-              { key: 'ws', label: 'WS', value: (r) => r.line.ws, render: (r) => f1(r.line.ws) },
-              { key: 'ws40', label: 'WS/40', value: (r) => r.line.ws40, render: (r) => f2(r.line.ws40) },
-              { key: 'va', label: 'VA', value: (r) => r.line.va, render: (r) => f1(r.line.va) },
-              { key: 'src', label: 'Origen', value: () => 'sim', render: () => <Tag kind="sim" /> },
-            ]}
-            rows={data.career}
-            rowKey={(r) => `${r.season}-${r.comp}-${r.stage}`}
-          />
-          {data.career.length === 0 && <p className="muted">Sin estadísticas todavía.</p>}
-          <p className="muted small">Promedios por partido. Las estadísticas reales importadas aparecerán aquí con su propia etiqueta, separadas de las simuladas.</p>
-        </section>
+        <CareerView career={data.career as CareerRow[]} moves={data.moves} youthClub={(p.youth_club as string | null) ?? null} currentClub={(p.club as string | null) ?? null} season={data.season} nav={nav} />
       )}
 
       {tab === 'log' && (
@@ -805,6 +785,9 @@ export function GameScreen({ id, nav }: { id: number; nav: Nav }) {
         {g.ot > 0 && <div className="muted">{g.ot === 1 ? 'Tras una prórroga' : `Tras ${g.ot} prórrogas`}</div>}
         {data.series && <div className="muted">Eliminatoria: {String(data.series.high_wins)}-{String(data.series.low_wins)}</div>}
       </section>
+      {!data.teams.length ? (
+        <p className="muted">{g.status === 'jugado' ? '⚡ Partido de simulación rápida: solo se guarda el resultado. Las estadísticas de los jugadores se suman a su temporada.' : 'Partido pendiente.'}</p>
+      ) : <>
       <Tabs small value={tab} onChange={setTab} options={[['box', 'Estadísticas'], ['pbp', 'Jugada a jugada'], ['shots', 'Tiros'], ['team', 'Equipos']]} />
       {tab === 'shots' && <Tabs<string> value={String(side)} onChange={(v) => setSide(Number(v) as 0 | 1)} options={[['0', g.home], ['1', g.away]]} />}
 
@@ -908,6 +891,7 @@ export function GameScreen({ id, nav }: { id: number; nav: Nav }) {
           <p className="muted small">Los cuatro factores de Dean Oliver: eFG%, pérdidas, rebote ofensivo y tiros libres.</p>
         </section>
       )}
+      </>}
     </div>
   );
 }
@@ -925,7 +909,6 @@ const LEADER_CATS: { key: string; label: string; value: (l: Q.PlayerLine) => num
   { key: 'pir', label: 'Valoración', value: (l) => l.pir / l.gp, fmt: f1 },
   { key: 'ws', label: 'Win Shares', value: (l) => l.ws, fmt: f1 },
   { key: 'va', label: 'Victorias añadidas', value: (l) => l.va, fmt: f1 },
-  { key: 'ws40', label: 'WS por 40 min', value: (l) => l.ws40, fmt: f2, min: (l) => l.sec >= 60 * 200 },
   { key: 'ts', label: 'TS%', value: (l) => l.ts, fmt: pc, min: (l) => fga(l) >= l.gp * 4 },
   { key: 't2', label: 'Tiros de 2 %', value: (l) => (l.fga2 ? l.fgm2 / l.fga2 : null), fmt: pc, min: (l) => l.fga2 >= l.gp * 3 },
   { key: 't3', label: 'Triples %', value: (l) => (l.fga3 ? l.fgm3 / l.fga3 : null), fmt: pc, min: (l) => l.fga3 >= l.gp * 1.5 },
@@ -936,26 +919,41 @@ const LEADER_CATS: { key: string; label: string; value: (l: Q.PlayerLine) => num
 export function LeagueScreen({ nav, myClub }: { nav: Nav; myClub: number }) {
   const [comp, setComp] = useSticky('league.comp', 1);
   const [tab, setTab] = useSticky<LTab>('league.tab', 'table');
-  const compTabs: [string, string][] = [['1', 'ACB'], ['2', 'FEB'], ['3', 'Copa'], ['4', 'EuroLeague'], ['5', 'EuroCup'], ['6', 'BCL']];
-  if (comp >= 3) {
+  const groups: [string, [number, string][]][] = [
+    ['España', [[1, 'Liga ACB'], [2, 'Primera FEB'], [3, 'Copa del Rey']]],
+    ['Europa', [[4, 'EuroLeague'], [5, 'EuroCup'], [6, 'Basketball Champions League']]],
+    ['Ligas extranjeras (simulación rápida)', [[7, 'Francia · Betclic ÉLITE'], [8, 'Italia · Serie A'], [9, 'Alemania · BBL'], [10, 'Turquía · Süper Ligi'], [11, 'Grecia · Basket League'], [12, 'NBA'], [13, 'NCAA']]],
+  ];
+  const picker = (
+    <select className="comppick" value={comp} onChange={(e) => setComp(Number(e.target.value))} aria-label="Competición">
+      {groups.map(([g, cs]) => <optgroup key={g} label={g}>{cs.map(([id, n]) => <option key={id} value={id}>{n}</option>)}</optgroup>)}
+    </select>
+  );
+  if (comp >= 3 && comp <= 6) {
     return (
       <div>
-        <Tabs<string> value={String(comp)} onChange={(v) => setComp(Number(v))} options={compTabs} />
+        {picker}
         <CupView comp={comp} nav={nav} myClub={myClub} />
       </div>
     );
   }
+  const fast = comp >= 7;
+  const tabs: [LTab, string][] = fast
+    ? [['table', 'Clasificación'], ['leaders', 'Líderes'], ['po', 'Playoffs'], ['hist', 'Campeones']]
+    : [['table', 'Clasificación'], ['leaders', 'Líderes'], ['teams', 'Equipos'], ['po', 'Playoffs'], ['awards', 'Premios'], ['records', 'Récords'], ['hist', 'Campeones']];
+  const cur = tabs.some(([k]) => k === tab) ? tab : 'table';
   return (
     <div>
-      <Tabs<string> value={String(comp)} onChange={(v) => setComp(Number(v))} options={compTabs} />
-      <Tabs<LTab> small value={tab} onChange={setTab} options={[['table', 'Clasificación'], ['leaders', 'Líderes'], ['teams', 'Equipos'], ['po', 'Playoffs'], ['awards', 'Premios'], ['records', 'Récords'], ['hist', 'Campeones']]} />
-      {tab === 'table' && <Standings comp={comp} nav={nav} myClub={myClub} adv={false} />}
-      {tab === 'teams' && <Standings comp={comp} nav={nav} myClub={myClub} adv />}
-      {tab === 'leaders' && <Leaders comp={comp} nav={nav} myClub={myClub} />}
-      {tab === 'po' && <Playoffs comp={comp} nav={nav} />}
-      {tab === 'hist' && <History />}
-      {tab === 'awards' && <AwardsView nav={nav} myClub={myClub} />}
-      {tab === 'records' && <RecordsView nav={nav} />}
+      {picker}
+      {fast && <p className="muted small fastnote">⚡ Simulación rápida: solo resultados y estadísticas de temporada (sin hoja de partido). Plantillas inventadas.</p>}
+      <Tabs<LTab> small value={cur} onChange={setTab} options={tabs} />
+      {cur === 'table' && <Standings comp={comp} nav={nav} myClub={myClub} adv={false} />}
+      {cur === 'teams' && <Standings comp={comp} nav={nav} myClub={myClub} adv />}
+      {cur === 'leaders' && <Leaders comp={comp} nav={nav} myClub={myClub} />}
+      {cur === 'po' && <Playoffs comp={comp} nav={nav} />}
+      {cur === 'hist' && <History />}
+      {cur === 'awards' && <AwardsView nav={nav} myClub={myClub} />}
+      {cur === 'records' && <RecordsView nav={nav} />}
     </div>
   );
 }
@@ -977,7 +975,7 @@ function Standings({ comp, nav, myClub, adv }: { comp: number; nav: Nav; myClub:
         { key: 'ftr', label: 'TL/TC', value: (r) => r.ff?.ftr ?? null, render: (r) => f2(r.ff?.ftr) },
       ]
     : [
-        { key: 'pos', label: '#', left: true, value: (r) => data.indexOf(r) + 1, render: (r) => { const i = data.indexOf(r) + 1; return <span className={comp === 1 && i <= 8 ? 'po' : (comp === 1 && i === n) || (comp === 2 && i === 1) ? 'mv' : ''}>{i}</span>; } },
+        { key: 'pos', label: '#', left: true, value: (r) => data.indexOf(r) + 1, render: (r) => { const i = data.indexOf(r) + 1; return <span className={(comp === 1 && i <= 8) || (comp >= 7 && i <= (PO_SIZE[comp] ?? 8)) ? 'po' : (comp === 1 && i > n - 2) || (comp === 2 && i <= 2) ? 'mv' : ''}>{i}</span>; } },
         { key: 'club', label: 'Club', left: true, value: (r) => r.name },
         { key: 'gp', label: 'PJ', value: (r) => r.gp },
         { key: 'w', label: 'G', value: (r) => r.w },
@@ -989,7 +987,7 @@ function Standings({ comp, nav, myClub, adv }: { comp: number; nav: Nav; myClub:
   return (
     <section>
       <Table cols={cols} rows={data} rowKey={(r) => r.club_id} highlight={(r) => r.club_id === myClub} onRow={(r) => nav.club(r.club_id)} defaultSort={adv ? { key: 'n', desc: true } : null} />
-      {!adv && <p className="muted small">{comp === 1 ? 'Los 8 primeros juegan los playoffs; el último desciende.' : 'El primero asciende a la Liga ACB.'}</p>}
+      {!adv && <p className="muted small">{comp === 1 ? 'Los 8 primeros juegan los playoffs; los dos últimos descienden.' : comp === 2 ? 'Los dos primeros ascienden a la Liga ACB.' : `Simulación rápida: solo resultados y estadísticas de temporada. Los ${PO_SIZE[comp] ?? 8} primeros juegan los playoffs.`}</p>}
       {adv && <p className="muted small">Fase regular. Posesiones exactas contadas por el motor.</p>}
     </section>
   );
@@ -997,7 +995,7 @@ function Standings({ comp, nav, myClub, adv }: { comp: number; nav: Nav; myClub:
 
 function Leaders({ comp, nav, myClub }: { comp: number; nav: Nav; myClub: number }) {
   const [stage0, setStage] = useState<'regular' | 'playoffs'>('regular');
-  const stage: Q.Stage = comp >= 3 ? 'all' : stage0;
+  const stage: Q.Stage = comp >= 3 && comp <= 6 ? 'all' : comp >= 7 ? 'regular' : stage0;
   const [cat, setCat] = useSticky('leaders.cat', 'pts');
   const { data, error } = useData<Q.PlayerLine[]>('leaders', { comp, stage }, [comp, stage]);
   if (!data) return <Loading error={error} />;
@@ -1031,16 +1029,21 @@ function Leaders({ comp, nav, myClub }: { comp: number; nav: Nav; myClub: number
 
 function Playoffs({ comp, nav }: { comp: number; nav: Nav }) {
   const { data, error } = useData<ReturnType<typeof Q.playoffs>>('playoffs', { comp }, [comp]);
-  if (comp !== 1) return <p className="muted">La Primera FEB no tiene playoffs en esta versión: el primero asciende directamente.</p>;
+  if (comp === 2) return <p className="muted">La Primera FEB no tiene playoffs en esta versión: los dos primeros ascienden directamente.</p>;
   if (!data) return <Loading error={error} />;
-  if (!data.length) return <p className="muted">Los playoffs empiezan al terminar la fase regular: 1º-8º, 4º-5º, 2º-7º y 3º-6º.</p>;
-  const rounds = [1, 2, 3].filter((r) => data.some((s) => s.round === r));
-  const label = { 1: 'Cuartos (al mejor de 3)', 2: 'Semifinales (al mejor de 5)', 3: 'Final (al mejor de 5)' } as Record<number, string>;
+  if (!data.length) return <p className="muted">Los playoffs empiezan al terminar la fase regular: {PO_SIZE[comp] === 16 ? 'los 16 primeros, 1º contra 16º, 8º contra 9º…' : '1º-8º, 4º-5º, 2º-7º y 3º-6º'}.</p>;
+  const rounds = [1, 2, 3, 4].filter((r) => data.some((s) => s.round === r));
+  const total = (PO_SIZE[comp] ?? 8) === 16 ? 4 : 3;
+  const names = total === 4 ? ['Octavos', 'Cuartos', 'Semifinales', 'Final'] : ['Cuartos', 'Semifinales', 'Final'];
+  const label = (r: number) => {
+    const bo = data.find((s) => s.round === r)?.best_of ?? 1;
+    return `${names[r - 1] ?? `Ronda ${r}`}${bo > 1 ? ` (al mejor de ${bo})` : ' (partido único)'}`;
+  };
   return (
     <section>
       {rounds.map((r) => (
         <div key={r}>
-          <h3>{label[r]}</h3>
+          <h3>{label(r)}</h3>
           <ul className="plain series">
             {data.filter((s) => s.round === r).map((s) => (
               <li key={s.id}>
@@ -1169,7 +1172,6 @@ function Glossary() {
         <dt>PÉR%</dt><dd>Pérdidas por cada 100 jugadas que acaba.</dd>
         <dt>WS (Win Shares)</dt><dd>Victorias del equipo que se le atribuyen por lo que aporta en ataque (OWS) y en defensa (DWS). La suma de un equipo se acerca a sus victorias.</dd>
         <dt>VA (victorias añadidas)</dt><dd>Victorias que aporta por encima de un suplente de nivel mínimo en sus mismos minutos. 0 = un jugador cualquiera habría hecho lo mismo.</dd>
-        <dt>WS/40</dt><dd>Win Shares por cada 40 minutos jugados; 0,10 es aproximadamente la media.</dd>
       </dl>
     </details>
   );
@@ -1241,7 +1243,7 @@ function LineupEditor({ clubId, nav }: { clubId: number; nav: Nav }) {
   const bench = data.filter((p) => !starters.includes(p.id));
   return (
     <div>
-      {msg && <p className="ok">{msg}</p>}
+      <Toast text={msg} />
       {err && <p className="error">{err}</p>}
       <section>
         <h3>Quinteto titular</h3>

@@ -12,7 +12,7 @@ import { DEFAULT_DEFENSE, DEFAULT_TACTICS, DEF_SYS, OFF_SYS, type DefFocus, type
 import { COMP_INFO } from '../core/names';
 import { call } from '../db/client';
 import { Face, parseColors } from './Face';
-import { Loading, type Nav, Tabs, clock, f1, shortName, useSticky } from './kit';
+import { Loading, type Nav, Tabs, clock, f1, shortName, useData, useSticky } from './kit';
 import { DEF_HELP, FOCUS, PACES, PRESSURE, SystemPicker } from './tactics';
 import { PreviewView } from './preview';
 import { pbpText } from './screens';
@@ -26,7 +26,7 @@ interface Info {
   roster: [number[], number[]];
   options: number[];
   season: number;
-  meta: Record<number, { atPos: number[]; arch: string }>;
+  meta: Record<number, { atPos: number[]; arch: string; pos2: string | null; perd: number; intd: number }>;
 }
 interface Sim { score: [number, number]; ot: number; pbp: number[][]; timeline: Snapshot[] }
 
@@ -459,10 +459,23 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
   const court = snap.court[side];
   const opp = snap.court[other];
   const pickSlot = pick !== null ? court.indexOf(pick) : -1;
+  // Banquillo: si has elegido a quién cambiar, primero los de su posición (por su media en ese puesto) y luego el resto por media.
+  const pickPos = pick !== null ? [people.get(pick)?.pos1, info.meta[pick]?.pos2].filter(Boolean) as string[] : [];
+  const samePos = (id: number) => pickPos.includes(people.get(id)?.pos1 ?? '') || pickPos.includes(info.meta[id]?.pos2 ?? '');
   const bench = info.roster[side].filter((id) => !court.includes(id)).sort((a, b) =>
     Number((snap.fouls[a] ?? 0) >= 5) - Number((snap.fouls[b] ?? 0) >= 5) ||
-    (pickSlot >= 0 ? (info.meta[b]?.atPos[pickSlot] ?? 0) - (info.meta[a]?.atPos[pickSlot] ?? 0) : 0));
+    (pick !== null ? Number(samePos(b)) - Number(samePos(a)) : 0) ||
+    (pick !== null && samePos(a) && pickSlot >= 0 ? (info.meta[b]?.atPos[pickSlot] ?? 0) - (info.meta[a]?.atPos[pickSlot] ?? 0) : 0) ||
+    (people.get(b)?.ovr ?? 0) - (people.get(a)?.ovr ?? 0));
   const pbpUpTo = sim.pbp.filter((e) => e[7]! < cursor);
+  // Puntos por cuarto (y prórrogas) hasta el momento que se está viendo.
+  const qPts: [number, number][] = [[0, 0], [0, 0], [0, 0], [0, 0]];
+  for (const e of pbpUpTo) {
+    const pts = e[0] === EV.MADE ? Math.floor((e[6]! % 100) / 10) : e[0] === EV.FT_MADE ? 1 : 0;
+    if (!pts) continue;
+    while (qPts.length < e[1]!) qPts.push([0, 0]);
+    qPts[e[1]! - 1]![e[3]! as 0 | 1] += pts;
+  }
   const lastEvIdx = (() => {
     for (let k = pbpUpTo.length - 1; k >= 0; k--) {
       const t = pbpUpTo[k]![0]!;
@@ -545,10 +558,10 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
       <div className={`pc ${sel ? 'sel' : ''}`} style={out ? { opacity: 0.4 } : undefined} onClick={onClick} role="button">
         {(snap.fouls[id] ?? 0) > 0 && <span className={`fouls ${(snap.fouls[id] ?? 0) >= 4 ? 'bad' : ''}`}>{snap.fouls[id]}f</span>}
         <PFace p={p} age={age(p)} colors={myColors} size={size} />
-        <div className="n">{shortName(p.name).split(' ').slice(-1)[0]}</div>
+        <div className="n" title={p.name}>{shortName(p.name).split(' ').slice(-1)[0]}</div>
         <div className="muted">{p.pos1} · {p.ovr}</div>
-        <div className="arch">{info.meta[id]?.arch ?? ''}</div>
-        <div><b>{b.pts}</b> pts · {b.orb + b.drb} r · {b.ast} a</div>
+        <div className="arch" title={info.meta[id]?.arch}>{info.meta[id]?.arch === 'Jugador de rol' ? 'De rol' : info.meta[id]?.arch ?? ''}</div>
+        <div className="st"><b>{b.pts}</b>p {b.orb + b.drb}r {b.ast}a</div>
         <Energy e={snap.energy[id] ?? 1} />
       </div>
     );
@@ -568,6 +581,16 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
           {snap.run[0] >= 6 && <b className="runb" style={{ color: ink[0] }}> · parcial {snap.run[0]}-0</b>}
           {snap.run[1] >= 6 && <b className="runb" style={{ color: ink[1] }}> · parcial 0-{snap.run[1]}</b>}
         </div>
+        <div className="lh-q" aria-label="Puntos por cuarto">
+          <span className="tn"><small>&nbsp;</small><b>{shorts[0]}</b><b>{shorts[1]}</b></span>
+          {qPts.map((q, i) => (
+            <span key={i} className={i + 1 === snap.period && !finished ? 'cur' : ''}>
+              <small>{i < 4 ? `${i + 1}C` : `P${i - 3}`}</small>
+              <b>{i + 1 > snap.period ? '–' : q[0]}</b>
+              <b>{i + 1 > snap.period ? '–' : q[1]}</b>
+            </span>
+          ))}
+        </div>
         {!finished ? (
           <div className="lh-ctl">
             <button onClick={() => setPlaying(!playing)}>{playing ? '❚❚' : '▶'}</button>
@@ -585,14 +608,17 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
             <button disabled={saving} onClick={() => void save()}>{saving ? 'Guardando…' : 'Guardar resultado y ver la hoja'}</button>
           </div>
         )}
-        {warns.length > 0 && (
+        {/* Un aviso cada vez y en un hueco de altura fija: así la pantalla no salta al aparecer o desaparecer. */}
+        {!finished && (
           <div className="warns">
-            {warns.slice(0, 3).map((w) => (
-              <div key={w.key} className="warn-row">
-                <span>📋 {w.text}</span>
-                {w.act && <button className="sec" onClick={w.act.run}>{w.act.label}</button>}
+            {warns[0] ? (
+              <div key={warns[0].key} className="warn-row">
+                <span>📋 {warns[0].text}{warns.length > 1 && <span className="muted"> (+{warns.length - 1})</span>}</span>
+                {warns[0].act && <button className="sec" onClick={warns[0].act.run}>{warns[0].act.label}</button>}
               </div>
-            ))}
+            ) : (
+              <div className="warn-row calm"><span className="muted">📋 Sin avisos del ayudante</span></div>
+            )}
           </div>
         )}
         <Tabs<LTab> small value={curTab} onChange={setTab} options={tabs} />
@@ -605,7 +631,7 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
         </div>
       )}
 
-      {curTab === 'previa' && <PreviewView gameId={info.game.id} nav={nav} />}
+      {curTab === 'previa' && <PreviewView gameId={info.game.id} nav={nav} onApplied={(t) => { setTac(t); if (t.defense) add({ kind: 'defense', defense: t.defense } as Intervention); }} />}
 
       {curTab === 'jugada' && (
         <>
@@ -637,7 +663,7 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
           <div className="oncourt">{court.map((id) => <Card key={id} id={id} size={40} sel={pick === id} onClick={() => !finished && setPick(pick === id ? null : id)} />)}</div>
           {pick !== null && !finished && (
             <div className="card">
-              <p className="small">Entra por <b>{people.get(pick)?.name}</b> (ordenados por su media en ese puesto):</p>
+              <p className="small">Entra por <b>{people.get(pick)?.name}</b>: primero los de su posición (por su media en ese puesto), luego el resto por media.</p>
               <div className="bench oncourt">
                 {bench.map((id) => <Card key={id} id={id} size={34} onClick={() => (snap.fouls[id] ?? 0) < 5 && doSub(id)} />)}
               </div>
@@ -661,9 +687,18 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
 
       {curTab === 'tactica' && (
         <>
+          <LivePresets clubId={info.userSide === 0 ? info.game.home_id : info.game.away_id} disabled={finished} onApply={(t) => {
+            const d: Defense = { ...def, ...t.defense, matchups: def.matchups ?? {}, special: def.special ?? null };
+            const nt: Tactics = { ...tac, ...t, defense: d };
+            setTac(nt);
+            add({ kind: 'offense', offense: nt.offense ?? 'equilibrado', pace: nt.pace ?? 'normal' } as Intervention);
+            add({ kind: 'plan', shot: nt.shot } as Intervention);
+            add({ kind: 'defense', defense: d } as Intervention);
+            if (nt.autoTimeout) add({ kind: 'autoTimeout', ...nt.autoTimeout } as Intervention);
+          }} />
           <section>
             <h3>Emparejamientos</h3>
-            <p className="muted small">Quién defiende a quién (por defecto, tu mejor defensor sobre su mayor peligro). Negar el balón: recibe menos y tu defensor se cansa más. Dos contra uno: casi no tira, pero sus compañeros quedan liberados.</p>
+            <p className="muted small">Quién defiende a quién (por defecto, tu mejor defensor sobre su mayor peligro). Negar el balón: recibe menos y tu defensor se cansa más. Dos contra uno: casi no tira, pero sus compañeros quedan liberados. En cada defensor ves su defensa exterior (E) e interior (I).</p>
             <div className="mlist">
               {opp.map((aid) => {
                 const cur = snap.match?.[other]?.[aid];
@@ -671,10 +706,9 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
                 return (
                   <div key={aid} className={'mrow' + (sp ? ' sp' : '')}>
                     <div className="mtop">
-                      <b>{shortName(people.get(aid)?.name ?? '')}</b> <span className="muted small">{people.get(aid)?.pos1} · {box.get(aid)?.pts ?? 0} pts</span>
+                      <b>{shortName(people.get(aid)?.name ?? '')}</b> <span className="muted small">{people.get(aid)?.pos1} · {info.meta[aid]?.arch} · {box.get(aid)?.pts ?? 0} pts</span>
                     </div>
                     <div className="mbot">
-                      <span className="muted small">Le defiende</span>
                       <select value={cur ?? ''} disabled={finished} onChange={(e) => {
                         const d = Number(e.target.value);
                         const m = { ...(def.matchups ?? {}) };
@@ -682,7 +716,7 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
                         m[aid] = d;
                         setDefense({ ...def, matchups: m });
                       }}>
-                        {court.map((did) => <option key={did} value={did}>{shortName(people.get(did)?.name ?? '')} ({people.get(did)?.pos1})</option>)}
+                        {court.map((did) => <option key={did} value={did}>{shortName(people.get(did)?.name ?? '')} · E{info.meta[did]?.perd ?? '—'} I{info.meta[did]?.intd ?? '—'}</option>)}
                       </select>
                       <span className="segs">
                         <button className={sp === 'negar' ? 'on' : ''} disabled={finished} onClick={() => setSpecial(aid, sp === 'negar' ? null : 'negar')}>Negar</button>
@@ -777,3 +811,18 @@ export function LiveScreen({ nav, onDone }: { nav: Nav; onDone: (gameId: number)
   );
 }
 void f1;
+
+/** Planes guardados en directo: un toque cambia ataque, ritmo, plan de tiro y defensa (los emparejamientos se mantienen). */
+function LivePresets({ clubId, disabled, onApply }: { clubId: number; disabled: boolean; onApply: (t: Tactics) => void }) {
+  const { data } = useData<{ slot: number; name: string; tactics: Tactics }[]>('presets', { clubId }, [clubId]);
+  const [cur, setCur] = useState<number | null>(null);
+  if (!data || !data.length) return null;
+  return (
+    <section>
+      <h3>Planes</h3>
+      <div className="segs wrap">
+        {data.map((p) => <button key={p.slot} className={cur === p.slot ? 'on' : ''} disabled={disabled} onClick={() => { setCur(p.slot); onApply(p.tactics); }}>{p.name}</button>)}
+      </div>
+    </section>
+  );
+}

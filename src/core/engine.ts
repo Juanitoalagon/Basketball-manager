@@ -218,6 +218,8 @@ export interface GameResult {
   shots: number[];
   pbp: number[][] | null;
   timeline?: Snapshot[];
+  /** Quintetos de cada equipo: «ids ordenados» → [segundos, puntos a favor, puntos en contra]. */
+  units: [Map<string, number[]>, Map<string, number[]>];
 }
 
 interface R {
@@ -319,7 +321,7 @@ export const DEF_SYS: Record<DefSystem, { label: string; hint: string; w: KindW;
   blitz: { label: 'Blitz (2x1 al bloqueo)', hint: 'Doble marcaje al manejador: muchas pérdidas o tiros liberados', w: { rim: 1.05, paint: 1, mid: 0.95, three: 1.05 }, make: { rim: 0.06, paint: 0.04, mid: 0.04, three: 0.06 }, tov: 0.22, oreb: 0, drain: 1.08, ast: 0.15 },
 };
 /** Interacciones ataque contra defensa (logit en el acierto del ataque y en las pérdidas). */
-const VS: Partial<Record<OffSystem, Partial<Record<DefSystem, { make?: Partial<KindW>; tov?: number }>>>> = {
+export const VS: Partial<Record<OffSystem, Partial<Record<DefSystem, { make?: Partial<KindW>; tov?: number }>>>> = {
   pickroll: { drop: { make: { mid: 0.06, rim: -0.05 } }, hedge: { tov: 0.05 }, switch: { make: { paint: 0.04 } } },
   pickpop: { drop: { make: { three: 0.08, mid: 0.06 } }, switch: { make: { three: -0.04 } } },
   pacespace: { zona23: { make: { three: 0.06 } }, zona131: { make: { three: 0.04 } }, zona32: { make: { three: 0.02 } } },
@@ -517,8 +519,14 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
     }
   };
 
+  const units: [Map<string, number[]>, Map<string, number[]>] = [new Map(), new Map()];
+  const unitOf = (s: Side) => {
+    const k = s.court.map((l) => l.p.id).sort((a, b) => a - b).join(',');
+    return units[s.idx].get(k) ?? units[s.idx].set(k, [0, 0, 0]).get(k)!;
+  };
   const spend = (t: number) => {
     clock -= t;
+    for (const s of sides) if (s.court.length === 5) unitOf(s)[0] += t;
     for (const s of sides) {
       for (const l of s.all) {
         if (l.onCourt) {
@@ -539,6 +547,8 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
     runPts[1 - s.idx] = 0;
     for (const x of sides[s.idx].court) x.box[F.pm] += n;
     for (const x of sides[1 - s.idx]!.court) x.box[F.pm] -= n;
+    unitOf(sides[s.idx])[1] += n;
+    unitOf(sides[1 - s.idx]!)[2] += n;
   };
   const avg = (xs: Live[], f: (l: Live) => number) => xs.reduce((a, l) => a + f(l), 0) / xs.length;
 
@@ -955,5 +965,5 @@ export function simulateGame(home: EngineTeam, away: EngineTeam, seed: number, o
     for (const s of sides) for (const l of s.all) { energy[l.p.id] = Math.round(l.energy * 100) / 100; fouls[l.p.id] = l.fouls; }
     timeline.push({ i: possIdx, period, clock: 0, score: [score[0], score[1]], court: [sides[0].court.map((l) => l.p.id), sides[1].court.map((l) => l.p.id)], energy, fouls, teamFouls: [sides[0].teamFouls, sides[1].teamFouls], run: [runPts[0], runPts[1]], tLeft: [tLeft[0], tLeft[1]], match: [matchObj(1), matchObj(0)] });
   }
-  return { score, ot, poss, box, side, starters, shots, pbp, timeline };
+  return { score, ot, poss, box, side, starters, shots, pbp, timeline, units };
 }

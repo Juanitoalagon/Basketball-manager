@@ -111,7 +111,7 @@ export interface Col<R> {
 }
 
 /** Tabla con primera columna fija, desplazamiento horizontal y orden al tocar la cabecera. */
-export function Table<R>({ cols, rows, rowKey, onRow, highlight, defaultSort, caption, foot, id }: {
+export function Table<R>({ cols, rows, rowKey, onRow, highlight, defaultSort, caption, foot, id, page }: {
   cols: Col<R>[];
   rows: R[];
   rowKey: (r: R) => string | number;
@@ -122,8 +122,11 @@ export function Table<R>({ cols, rows, rowKey, onRow, highlight, defaultSort, ca
   foot?: ReactNode;
   /** Si se da, el orden elegido se recuerda al volver a la pantalla. */
   id?: string;
+  /** Filas que se pintan de entrada (las demás, con «Mostrar más»): listas largas sin atascar el móvil. */
+  page?: number;
 }) {
   const anon = useRef(`anon${++anonN}`);
+  const [shown, setShown] = useState(page ?? Infinity);
   const [sort, setSort] = useSticky<{ key: string; desc: boolean } | null>(`sort:${id ?? anon.current}`, defaultSort ?? null);
   const sorted = useMemo(() => {
     if (!sort) return rows;
@@ -158,7 +161,7 @@ export function Table<R>({ cols, rows, rowKey, onRow, highlight, defaultSort, ca
           </tr>
         </thead>
         <tbody>
-          {sorted.map((r) => (
+          {sorted.slice(0, shown).map((r) => (
             <tr key={rowKey(r)} onClick={onRow ? () => onRow(r) : undefined} className={`${onRow ? 'tap' : ''} ${highlight?.(r) ? 'me' : ''}`}>
               {cols.map((c) => (
                 <td key={c.key} className={c.left ? 'l' : ''}>
@@ -170,6 +173,7 @@ export function Table<R>({ cols, rows, rowKey, onRow, highlight, defaultSort, ca
         </tbody>
         {foot}
       </table>
+      {sorted.length > shown && <button className="sec more" onClick={() => setShown(shown + (page ?? 100))}>Mostrar más ({sorted.length - shown} más)</button>}
     </div>
   );
 }
@@ -215,3 +219,19 @@ export type Nav = {
   live: () => void;
   back: () => void;
 };
+
+/**
+ * Aviso flotante: aparece encima de la barra inferior y se va solo a los 4 s (o al tocarlo).
+ * No empuja el contenido, así la pantalla no salta al guardar algo.
+ */
+export function Toast({ text, ok = true }: { text: string | null | undefined; ok?: boolean }) {
+  const [hidden, setHidden] = useState<string | null>(null);
+  useEffect(() => {
+    if (!text) return;
+    setHidden(null);
+    const t = setTimeout(() => setHidden(text), 4000);
+    return () => clearTimeout(t);
+  }, [text]);
+  if (!text || hidden === text) return null;
+  return <div className={`toast ${ok ? 'ok' : 'error'}`} role="status" onClick={() => setHidden(text)}>{text}</div>;
+}

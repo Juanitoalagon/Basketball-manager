@@ -5,7 +5,7 @@ import type { Focus, Intensity, Training } from '../core/world';
 import { call } from '../db/client';
 import { Face } from './Face';
 import { ATTRS } from '../core/attributes';
-import { CupoSummary, CupoTag, Loading, type Nav, useData } from './kit';
+import { CupoSummary, CupoTag, Loading, type Nav, useData, Toast } from './kit';
 import { eur } from './market';
 
 type Office = ReturnType<typeof Q.office>;
@@ -142,7 +142,7 @@ export function IndividualTraining({ clubId, nav }: { clubId: number; nav: Nav }
     <section>
       <h3>Entrenamiento individual · {data.used}/{data.slots} plazas</h3>
       <p className="muted small">Un plan concreto para cada jugador, además del foco del equipo: un atributo, un grupo, un arquetipo (por ejemplo, convertir a un alero en 3&D) o aprender una posición nueva. Se nota en la evolución de verano: mucho en los jóvenes (sobre todo en la cantera) y poco en los veteranos. Más plazas mejorando las instalaciones.</p>
-      {msg && <p className={msg.ok ? 'ok' : 'error'}>{msg.message}</p>}
+      <Toast text={msg?.message} ok={msg?.ok ?? true} />
       {data.players.map((p) => (
         <div key={p.id} className="trow">
           <span className="tap" onClick={() => nav.player(p.id)}>

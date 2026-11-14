@@ -6,7 +6,7 @@ import type * as Q from '../core/queries';
 import type { DayReport } from '../core/season';
 import { call, cancelLoad, setProgressListener } from '../db/client';
 import type { ImportReport, LoadProgress, LoadResult, Status } from '../db/protocol';
-import { type Nav, Loading, Tabs, f0, seasonLabel, useData } from './kit';
+import { type Nav, Loading, Tabs, f0, seasonLabel, useData, Toast } from './kit';
 import { GameScreen, GamesScreen, HomeScreen, LeagueScreen, PlayerScreen, SquadScreen } from './screens';
 import { PlayersScreen } from './market';
 import { LiveScreen } from './live';
@@ -366,7 +366,7 @@ function DataScreen({ st, setSt, onChanged }: { st: Status; setSt: (s: Status) =
       <FaceSettings />
       <p className="muted">Versión {st.appVersion} · esquema {st.schemaVersion}</p>
       {error && <p className="error" role="alert">{error}</p>}
-      {msg && <p className="ok" role="status">{msg}</p>}
+      <Toast text={msg} />
       {busy && <p className="muted" role="status">{busy}</p>}
 
       <section>

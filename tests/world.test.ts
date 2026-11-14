@@ -2,8 +2,8 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import { wrapDb } from '../src/db/adapter';
 import { migrate, type Db } from '../src/core/schema';
-import { chooseClub, createUniverse } from '../src/core/season';
-import { releasePlayer, signFreeAgent } from '../src/core/market';
+import { chooseClub, convocados, createUniverse, getUniverse } from '../src/core/season';
+import { ROOKIE_SALARY, releasePlayer, signFreeAgent } from '../src/core/market';
 import { cupoCounts, getTraining, promoteYouth, releaseYouth, scoutNoise, setTraining, trainingBonus, upgradeClub, upgradeCost } from '../src/core/world';
 import { CUPO_RULES, cupoOf } from '../src/core/names';
 import { Rng } from '../src/core/rng';
@@ -31,7 +31,7 @@ describe('cupos', () => {
     expect(cupoOf('US')).toBe('EXT');
     expect(cupoOf('RS')).toBe('EXT');
   });
-  it('no deja fichar un tercer extracomunitario', () => {
+  it('deja fichar un tercer extracomunitario, pero en la liga solo se convocan dos', () => {
     // Forzamos dos extracomunitarios en la plantilla.
     const ids = db.rows<{ id: number }>("SELECT id FROM player WHERE club_id = ? AND nationality <> 'ES' ORDER BY id", [ME]).map((x) => x.id);
     const ext = db.rows<{ id: number }>("SELECT id FROM player WHERE club_id = ? AND nationality = 'US'", [ME]).length;
@@ -40,9 +40,12 @@ describe('cupos', () => {
     db.exec('UPDATE club SET cash = 50000000, budget = 50000000 WHERE id = ?', [ME]);
     const fa = db.rows<{ id: number }>('SELECT id FROM player WHERE club_id IS NULL AND youth = 0 AND retired = 0 LIMIT 1')[0]!.id;
     db.exec("UPDATE player SET nationality = 'US' WHERE id = ?", [fa]);
-    const r = signFreeAgent(db, ME, fa, 2_000_000, 1);
-    expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/extracomunitario/i);
+    const r = signFreeAgent(db, ME, fa, 9_000_000, 1);
+    expect(r.ok).toBe(true);
+    expect(cupoCounts(db, ME).EXT).toBeGreaterThan(CUPO_RULES.maxExt);
+    const nat = (rows: Record<string, unknown>[]) => rows.filter((x) => cupoOf(String(x.nationality)) === 'EXT').length;
+    expect(nat(convocados(db, ME, getUniverse(db)!.game_season, 1))).toBe(CUPO_RULES.maxExt);
+    expect(nat(convocados(db, ME, getUniverse(db)!.game_season, 4))).toBeGreaterThan(CUPO_RULES.maxExt);
   });
   it('no deja bajar del mínimo de nacionales', () => {
     const nac = db.rows<{ id: number }>("SELECT id FROM player WHERE club_id = ? AND nationality = 'ES' ORDER BY id", [ME]).map((x) => x.id);
@@ -68,7 +71,7 @@ describe('cantera', () => {
     expect(r.ok).toBe(true);
     expect(one('SELECT club_id FROM player WHERE id = ?', [y.id])).toBe(ME);
     expect(one('SELECT youth FROM player WHERE id = ?', [y.id])).toBe(0);
-    expect(one('SELECT salary FROM contract WHERE player_id = ?', [y.id])).toBe(30_000);
+    expect(one('SELECT salary FROM contract WHERE player_id = ?', [y.id])).toBe(ROOKIE_SALARY);
     const other = mine.find((x) => x.id !== y.id)!;
     expect(releaseYouth(db, other.id, ME).ok).toBe(true);
     expect(promoteYouth(db, other.id, ME).ok).toBe(false);

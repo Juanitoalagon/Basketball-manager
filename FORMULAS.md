@@ -134,7 +134,7 @@ retiradas y cantera son provisionales (la fase 10 las sustituirá). Asciende el 
 
 - **Sueldo de mercado** por media: 50.000 € · e^(0,085 · (media − 45)) → 45: 50 mil €, 60: 180 mil €, 70: 420 mil €, 80: 980 mil €.
 - **Lo que pide un jugador**: ese sueldo con su media (si tiene menos de 25 años, media + 40 % de lo que le falta hasta su potencial estimado),
-  ×0,8 con 32-33 años, ×0,6 con 34 o más, ×1,1 si está descontento (moral < 40).
+  × factor de edad (desde la v0.8: 1 hasta los 30 y −9 % por año a partir de ahí; ver «Economía y negociación»), ×1,1 si está descontento (moral < 40).
 - **Valor de traspaso**: lo que pediría × factor de edad (3 hasta 21 años, 2,5 hasta 24, 2 hasta 27, 1,5 hasta 30, 0,9 hasta 32, 0,4 después)
   × 0,5 si su contrato acaba esta temporada y × 0,8 si acaba la siguiente.
 - **Comprar**: el club vendedor acepta desde el valor de mercado (+30 % si es uno de sus 3 mejores) y si se queda con al menos 11 jugadores;
@@ -290,3 +290,83 @@ Liga ACB y Primera FEB, fase regular, mínimo la mitad de los partidos y de los 
 - Solo con el mercado abierto. Puedes ceder a jóvenes a clubes ACB o FEB, que pagan parte del sueldo. Allí juegan los minutos que les dé su rol y vuelven al acabar la temporada, o antes si los repescas.
 - Pedir cedido: su club no cede a nadie de su top 8, ni si se queda con 11 o menos jugadores. Debes pagar al menos el 50 % del sueldo.
 - Los cedidos no se pueden vender, renovar ni traspasar mientras dure la cesión.
+
+## Economía y negociación (v0.8)
+- Sueldo pedido: factor de edad = 1 hasta los 30 años y luego 1 − 0,09·(edad − 30), con un mínimo de 0,35. Por ejemplo, 0,73 a los 33 y 0,55 a los 35. Al renovar se calcula con la edad que tendrá al empezar el contrato nuevo. En los menores de 25 cuenta el 40 % de lo que le falta para llegar a su potencial.
+- Regateo: si a la oferta le falta un 30 % o menos, la otra parte cede: cesión += 0,35·lo que falta + 2 %. Hay un tope:
+  - Jugador: 10 % (12 % si está contento; 18 % con 32 años o más), y 3 puntos más si es una renovación.
+  - Club vendedor: 15 % (8 % si es uno de sus 3 mejores).
+- Si la oferta ofende (falta más de un 30 %), no cede nada y la paciencia baja 40. Si no, baja 14 o 22 según lo lejos que esté la oferta.
+- Caja a salarios: puedes pasar dinero de la caja al presupuesto salarial de la temporada en curso, y devolver lo que no estés usando. Al cerrar la temporada, lo que sobra del presupuesto vuelve a la caja. El presupuesto nuevo se calcula desde el presupuesto base, sin lo que añadiste.
+- Lesiones: al terminar la temporada, el verano resta 40 partidos de baja a cada lesión, lo que cura casi todas.
+
+## Arquetipos nuevos (v0.8)
+- Pívot pasador: media de pase, visión, IQ y poste ≥ 52, solo para PF o C y con pase ≥ 50.
+- Tirador de media: media de 2× tiro de dos, creación y consistencia ≥ 62, con tiro de dos ≥ 64.
+- Atleta: media de velocidad, salto, agilidad y resistencia ≥ 64.
+- Líder: media de liderazgo, experiencia, IQ y disciplina ≥ 62, con liderazgo ≥ 64.
+- Cerrador: media de 2× sangre fría, creación y tiros libres ≥ 63, con sangre fría ≥ 66.
+
+## Cambios en directo (v0.8)
+- Al elegir a quién cambiar, el banquillo sale ordenado así: primero los que juegan en su posición (principal o secundaria), por su media en ese puesto; luego el resto, por media.
+
+## Ligas de otros países: simulación rápida (v0.9)
+- **Ligas:**
+  - Francia, Italia, Alemania, Turquía y Grecia: los clubes que juegan en Europa más otros de su país.
+  - NBA: 30 equipos.
+  - NCAA: 16 universidades de las más conocidas.
+  - Nombres públicos y plantillas inventadas. En Europa, la mitad de cada plantilla es del país; en la NBA, el 72 %; en la NCAA, la mitad son de EE. UU. y el resto de fuera, también españoles.
+- **Fechas:**
+  - Las ligas europeas juegan en los sábados de la ACB (Europa va en miércoles): ningún club juega dos veces el mismo día.
+  - La NBA juega de mediados de octubre a mediados de abril, y la NCAA de noviembre a principios de marzo.
+  - Todas se juegan a doble vuelta (la NBA, 58 partidos) y luego tienen playoffs: los 8 primeros (16 en la NBA, al mejor de 7). La NCAA hace un cuadro a partido único.
+- **Nivel de un equipo:** media ponderada de la media de sus 9 mejores jugadores sanos, con peso 1 para los cinco primeros y 0,7, 0,55, 0,4 y 0,3 para los cuatro siguientes.
+- **Resultado:**
+  - diferencia = 1,1·(nivel local − nivel visitante) + factor cancha (3; 2,5 en la NBA; 3,5 en la NCAA) + azar (desviación ≈ 11).
+  - total de puntos = 2·media de la liga + azar (≈ 11).
+  - Si empatan, se juega prórroga de 5 a 12 puntos por equipo.
+- **Estadísticas:**
+  - Minutos según el orden por media (32, 30, 29, 27, 25, 20, 16, 12 y 9 por cada 40, escalados a 200 o 240).
+  - Los puntos del equipo se reparten con un peso de minutos·e^(0,035·(ataque − 60)).
+  - Rebotes, asistencias, robos y tapones se reparten igual con sus atributos.
+  - Se guarda el total de la temporada, no cada partido: no hay hoja de partido.
+- **NCAA → NBA:**
+  - En verano dejan la universidad los de 23 años, los de 21-22 con media 64 o más y los de 20 con 69 o más.
+  - Los de media 58 o más entran en la NBA por un draft de dos rondas, en el que eligen primero los peores.
+  - El resto sale al mercado como agente libre: los puede fichar cualquiera, también tú.
+  - Los universitarios no tienen contrato ni se pueden fichar ni ceder mientras están en la NCAA.
+- **Salir de la NBA:** para irse a otra liga, un jugador de la NBA pide ×1,6 de sueldo.
+
+## Economía (v0.9)
+- **Sueldo de mercado:** 72.000 € · e^(0,11·(media − 45)). Son unos 210.000 € con 55 de media, 1,1 M€ con 70, 3,4 M€ con 80 y 10 M€ con 90. Las partidas antiguas se convierten solas, contrato a contrato.
+- **Presupuestos:** masa salarial × (1,04-1,14) al crear la partida. La ACB de media tabla queda en 5-8 M€ y los grandes en 11-14 M€.
+- **Taquilla** (en cada partido en casa): B · 0,0095 · ocupación / 0,7 · fase.
+  - ocupación = 0,5 + 0,2·(reputación − 60)/30 + 0,35·(% victorias − 0,5) + 0,05·(reputación rival − 60)/30, entre 0,3 y 1.
+  - fase: playoffs ×1,4, cruces europeos ×1,5, Europa ×1,1. En la Copa, ×0,6 para cada club.
+- **Patrocinio:** B · (0,06 + 0,10 · % de victorias). **Gastos fijos:** B · 0,26.
+- **Presupuesto siguiente:** B · (1 + 0,5·(taquilla + patrocinio + premios − gastos)/B + objetivo + reinversión), entre ×0,82 y ×1,25. B es el presupuesto base, sin la caja pasada a salarios.
+- **Ascensos y descensos:** suben los 2 primeros de la Primera FEB y bajan los 2 últimos de la ACB.
+  - El recién ascendido recibe al menos el 85 % del presupuesto más bajo de la ACB.
+  - El que baja pierde el 40 % del suyo.
+
+## Promesas, peticiones de salida y extracomunitarios (v0.9)
+- **Promesas:** prometer un papel rebaja lo que pide el jugador. Titular (25 min) −10 %, rotación (17 min) −5 %, o unos minutos concretos (−10 % con 25 o más, −5 % con 17 o más, −2 % con 10 o más).
+  - Tras cada partido se miran sus minutos de los 5 últimos: si juega 4 o más por debajo de lo prometido, suma un aviso y pierde 3 de moral.
+  - Con 5 avisos la promesa se rompe: −15 de moral, pide salir y ya no se cree tus promesas.
+- **Peticiones de salida:** el jugador pide salir tras 8 partidos seguidos con la moral por debajo de 35, o al romperle una promesa. Mientras tanto rinde 3 puntos menos en todos sus atributos.
+  - Ponerlo en venta: le llegan más ofertas, un 10 % más baratas.
+  - Prometerle minutos.
+  - Hablar con él: sale bien con probabilidad 0,35 + liderazgo/200 + moral/300, una vez cada 6 días.
+- **Extracomunitarios:** puedes tener los que quieras en plantilla, pero en ACB, Primera FEB y Copa solo se convocan dos por partido.
+  - Primero los titulares del Quinteto; después, los de más media. Los marcados «fuera» son los últimos.
+  - En Europa se convocan todos. La IA no pasa de tres.
+
+## Informe del rival, quintetos y planes (v0.9)
+- **Informe del rival:**
+  - Peligro: su máximo anotador por partido (o el de más media, si aún no ha jugado).
+  - Emparejamiento: tu mejor defensor sobre él, de entre tus 8 de más media. Si es exterior, por 0,7·defensa exterior + 0,3·agilidad; si es interior, por 0,6·defensa interior + 0,4·tapón.
+  - Negarle el balón si promedia 15 puntos o más; 2 contra 1 si promedia 20 o más.
+  - Prioridad: salir a tiradores si tira de tres 4 puntos más que la liga; cerrar la pintura si tira 4 menos.
+  - Sistema defensivo: el que más suma entre el encaje con tu plantilla y su efecto contra el ataque rival.
+- **Quintetos:** minutos, puntos a favor y en contra de cada combinación de cinco jugadores en tus partidos completos. +/- por 40 = (a favor − en contra) · 2400 / segundos juntos. En «Mejores» y «Peores» solo cuentan los de 10 minutos o más.
+- **Planes guardados:** hasta 3. Guardan ataque, ritmo, plan de tiro, defensa y tiempos muertos, pero no los emparejamientos, que dependen del rival.

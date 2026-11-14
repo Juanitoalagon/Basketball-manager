@@ -4,6 +4,8 @@ import type * as Q from '../core/queries';
 import { fga, fgm, reb } from '../core/stats';
 import { call } from '../db/client';
 import { cupoOf } from '../core/names';
+import { ATTRS, type AttrKey } from '../core/attributes';
+import { ARCHETYPES, type ArchetypeKey } from '../core/archetype';
 import { YouthReport } from './history';
 import { ovrClass } from './screens';
 import { type Col, CupoTag, Loading, type Nav, notifyChange, posSort, shortName, useChangeTick, useSticky, Table, Tabs, f1, f2, mins, pc, pcRaw, seasonLabel, signed, useData } from './kit';
@@ -35,18 +37,40 @@ function LoanOutPanel({ id, onDone, onCancel }: { id: number; onDone: (r: Result
   );
 }
 
-/** Dinero disponible siempre a la vista: caja para traspasos y margen salarial. */
+/** Dinero disponible siempre a la vista: caja para traspasos y margen salarial. Se puede pasar caja a salarios. */
 export function MoneyBar({ clubId }: { clubId: number }) {
   const tick = useChangeTick();
-  const { data } = useData<{ cash: number; budget: number; payroll: number }>('money', { clubId }, [clubId, tick]);
+  const { data } = useData<{ cash: number; budget: number; payroll: number; extra: number }>('money', { clubId }, [clubId, tick]);
+  const [open, setOpen] = useState(false);
+  const [amount, setAmount] = useState(500_000);
+  const [msg, setMsg] = useState<Result | null>(null);
   if (!data) return null;
   const room = data.budget - data.payroll;
+  const move = async (x: number) => {
+    const r = await call<Result>('moveCash', { clubId, amount: x });
+    setMsg(r);
+    if (r.ok) notifyChange();
+  };
   return (
-    <div className="moneybar" role="status">
-      <span><small>Caja</small><b className={data.cash < 0 ? 'bad' : ''}>{eur(data.cash)}</b></span>
-      <span><small>Margen salarial</small><b className={room < 0 ? 'bad' : room < 100_000 ? 'warn' : 'good'}>{eur(room)}</b></span>
-      <span><small>Masa / presupuesto</small><b>{eur(data.payroll)} / {eur(data.budget)}</b></span>
-    </div>
+    <>
+      <div className="moneybar" role="status">
+        <span><small>Caja</small><b className={data.cash < 0 ? 'bad' : ''}>{eur(data.cash)}</b></span>
+        <span><small>Margen salarial</small><b className={room < 0 ? 'bad' : room < 100_000 ? 'warn' : 'good'}>{eur(room)}</b></span>
+        <span><small>Masa / presupuesto</small><b>{eur(data.payroll)} / {eur(data.budget)}</b></span>
+        <button className="sec mbtn" aria-expanded={open} onClick={() => setOpen(!open)} title="Pasar dinero de la caja a salarios">⇄</button>
+      </div>
+      {open && (
+        <div className="card movecash">
+          <p className="small">La caja (lo que ingresas por ventas y premios) también puede pagar sueldos: pasa la cantidad que quieras al presupuesto salarial <b>de esta temporada</b>. Lo que no gastes vuelve a la caja al acabar; la temporada siguiente el presupuesto parte otra vez del de la directiva.{data.extra > 0 && <> Ya has pasado <b>{eur(data.extra)}</b> esta temporada.</>}</p>
+          <MoneyInput label="Cantidad" value={amount} onChange={setAmount} step={100_000} />
+          <div className="row">
+            <button onClick={() => void move(amount)} disabled={amount <= 0 || amount > data.cash}>Pasar a salarios</button>
+            {data.extra > 0 && <button className="sec" onClick={() => void move(-Math.min(amount, data.extra))}>Devolver a la caja</button>}
+          </div>
+          {msg && <p className={msg.ok ? 'ok' : 'error'}>{msg.message}</p>}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -57,22 +81,37 @@ type Grp = 'basic' | 'shoot' | 'adv' | 'market';
 
 export function PlayersScreen({ nav, myClub }: { nav: Nav; myClub: number }) {
   const { data, error } = useData<PRow[]>('allPlayers', null, []);
-  const [scope, setScope] = useSticky<'acb' | 'feb' | 'europa' | 'libres' | 'seguidos' | 'jovenes' | 'todos'>('pl.scope', 'acb');
+  const [scope, setScope] = useSticky<'acb' | 'feb' | 'europa' | 'nba' | 'ncaa' | 'libres' | 'seguidos' | 'jovenes' | 'todos'>('pl.scope', 'acb');
   const [cupo, setCupo] = useSticky('pl.cupo', '');
-  const [pos, setPos] = useSticky('pl.pos', '');
+  const [poss, setPoss] = useSticky<string[]>('pl.poss', []);
+  const [minAge, setMinAge] = useSticky('pl.agemin', 16);
   const [maxAge, setMaxAge] = useSticky('pl.age', 40);
   const [minGp, setMinGp] = useSticky('pl.gp', 0);
+  const [minOvr, setMinOvr] = useSticky('pl.ovr', 0);
+  const [arch, setArch] = useSticky('pl.arch', '');
+  const [conds, setConds] = useSticky<[AttrKey, number][]>('pl.conds', []);
+  const [maxFee, setMaxFee] = useSticky('pl.fee', 0);
+  const [maxSal, setMaxSal] = useSticky('pl.sal', 0);
+  const [more, setMore] = useSticky('pl.more', false);
   const [q, setQ] = useSticky('pl.q', '');
   const [group, setGroup] = useSticky<Grp>('pl.group', 'basic');
   const rows = useMemo(() => {
     if (!data) return [];
     const needle = q.trim().toLowerCase();
     return data.filter((r) =>
-      (scope === 'todos' || (scope === 'seguidos' ? r.watched : scope === 'libres' ? r.club_id === null : scope === 'europa' ? r.club_id !== null && r.country !== 'ES' : scope === 'acb' ? r.comp === 1 : r.comp === 2)) &&
+      (scope === 'todos' || (scope === 'seguidos' ? r.watched : scope === 'libres' ? r.club_id === null : scope === 'europa' ? r.club_id !== null && r.country !== 'ES' && r.comp !== 12 && r.comp !== 13 : scope === 'nba' ? r.comp === 12 : scope === 'ncaa' ? r.comp === 13 : scope === 'acb' ? r.comp === 1 : r.comp === 2)) &&
       (!cupo || cupoOf(r.nationality) === cupo) &&
-      (!pos || r.pos1 === pos || r.pos2 === pos) && r.age <= maxAge && (r.line?.gp ?? 0) >= minGp &&
+      (!poss.length || poss.includes(r.pos1) || (r.pos2 !== null && poss.includes(r.pos2))) &&
+      r.age >= minAge && r.age <= maxAge && (r.line?.gp ?? 0) >= minGp && r.ovr >= minOvr &&
+      (!arch || r.archs.includes(arch as ArchetypeKey)) &&
+      conds.every(([k, v]) => r.attrs[k] >= v) &&
+      (!maxFee || r.club_id === null || r.value <= maxFee) &&
+      (!maxSal || (r.salary ?? r.ask) <= maxSal) &&
       (!needle || r.name.toLowerCase().includes(needle)));
-  }, [data, scope, pos, maxAge, minGp, q, cupo]);
+  }, [data, scope, poss, minAge, maxAge, minGp, minOvr, arch, conds, maxFee, maxSal, q, cupo]);
+  const active = Number(poss.length > 0) + Number(minAge > 16 || maxAge < 40) + Number(minGp > 0) + Number(minOvr > 0) + Number(!!arch) + conds.length + Number(maxFee > 0) + Number(maxSal > 0) + Number(!!cupo);
+  const clearAll = () => { setPoss([]); setMinAge(16); setMaxAge(40); setMinGp(0); setMinOvr(0); setArch(''); setConds([]); setMaxFee(0); setMaxSal(0); setCupo(''); };
+  const AGES = Array.from({ length: 25 }, (_, i) => 16 + i);
   if (!data) return <Loading error={error} />;
   const L = (r: PRow) => r.line;
   const pg = (r: PRow, v: (l: NonNullable<PRow['line']>) => number) => (L(r) && L(r)!.gp ? v(L(r)!) / L(r)!.gp : null);
@@ -108,7 +147,6 @@ export function PlayersScreen({ nav, myClub }: { nav: Nav; myClub: number }) {
       { key: 'astp', label: 'AST%', value: (r) => L(r)?.astPct ?? null, render: (r) => pcRaw(L(r)?.astPct) },
       { key: 'rebp', label: 'REB%', value: (r) => L(r)?.rebPct ?? null, render: (r) => pcRaw(L(r)?.rebPct) },
       { key: 'ws', label: 'WS', value: (r) => L(r)?.ws ?? null, render: (r) => f1(L(r)?.ws) },
-      { key: 'ws40', label: 'WS/40', value: (r) => L(r)?.ws40 ?? null, render: (r) => (L(r) ? f2(L(r)!.ws40) : '—') },
       { key: 'va', label: 'VA', value: (r) => L(r)?.va ?? null, render: (r) => f1(L(r)?.va) },
       { key: 'pm', label: '+/-', value: (r) => L(r)?.pm ?? null, render: (r) => (L(r) ? signed(L(r)!.pm) : '—') },
     ],
@@ -127,31 +165,81 @@ export function PlayersScreen({ nav, myClub }: { nav: Nav; myClub: number }) {
       <h2>Jugadores</h2>
       <MoneyBar clubId={myClub} />
       <MarketBanner nav={nav} />
-      <Tabs<typeof scope> value={scope} onChange={setScope} options={[['acb', 'Liga ACB'], ['feb', 'Primera FEB'], ['europa', 'Europa'], ['libres', 'Agentes libres'], ['seguidos', '★ Seguidos'], ['jovenes', 'Jóvenes'], ['todos', 'Todos']]} />
+      <Tabs<typeof scope> value={scope} onChange={setScope} options={[['acb', 'Liga ACB'], ['feb', 'Primera FEB'], ['europa', 'Europa'], ['nba', 'NBA'], ['ncaa', 'NCAA'], ['libres', 'Agentes libres'], ['seguidos', '★ Seguidos'], ['jovenes', 'Jóvenes'], ['todos', 'Todos']]} />
       {scope === 'jovenes' ? <YouthReport nav={nav} myClub={myClub} /> : <>
       <div className="filters">
         <input type="text" placeholder="Buscar por nombre" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Buscar" />
-        <select value={pos} onChange={(e) => setPos(e.target.value)} aria-label="Posición">
-          <option value="">Todas las posiciones</option>
-          {['PG', 'SG', 'SF', 'PF', 'C'].map((p) => (<option key={p} value={p}>{p}</option>))}
-        </select>
-        <select value={maxAge} onChange={(e) => setMaxAge(Number(e.target.value))} aria-label="Edad máxima">
-          {[40, 30, 27, 24, 21].map((a) => (<option key={a} value={a}>{a === 40 ? 'Cualquier edad' : `Hasta ${a} años`}</option>))}
-        </select>
-        <select value={cupo} onChange={(e) => setCupo(e.target.value)} aria-label="Cupo">
-          <option value="">Cualquier cupo</option>
-          <option value="NAC">Nacionales (NAC)</option>
-          <option value="COM">Comunitarios (COM)</option>
-          <option value="EXT">Extracomunitarios (EXT)</option>
-        </select>
-        <select value={minGp} onChange={(e) => setMinGp(Number(e.target.value))} aria-label="Partidos mínimos">
-          {[0, 5, 10, 20].map((g) => (<option key={g} value={g}>{g ? `${g}+ partidos` : 'Con o sin partidos'}</option>))}
-        </select>
+        <div className="poschips" role="group" aria-label="Posiciones">
+          {['PG', 'SG', 'SF', 'PF', 'C'].map((p) => (
+            <button key={p} className={poss.includes(p) ? 'on' : ''} aria-pressed={poss.includes(p)} onClick={() => setPoss(poss.includes(p) ? poss.filter((x) => x !== p) : [...poss, p])}>{p}</button>
+          ))}
+        </div>
+        <label className="fl"><small>Edad (de – a)</small>
+          <span className="row tight">
+            <select value={minAge} onChange={(e) => setMinAge(Number(e.target.value))} aria-label="Edad mínima">{AGES.map((a) => <option key={a} value={a}>{a}</option>)}</select>
+            <select value={maxAge} onChange={(e) => setMaxAge(Number(e.target.value))} aria-label="Edad máxima">{AGES.map((a) => <option key={a} value={a}>{a}</option>)}</select>
+          </span>
+        </label>
+        <label className="fl"><small>Media mínima</small>
+          <select value={minOvr} onChange={(e) => setMinOvr(Number(e.target.value))} aria-label="Media mínima">
+            {[0, 50, 55, 60, 65, 70, 75, 80].map((v) => <option key={v} value={v}>{v ? `${v} o más` : 'Cualquiera'}</option>)}
+          </select>
+        </label>
+        <button className="sec morebtn" onClick={() => setMore(!more)} aria-expanded={more}>{more ? '▾' : '▸'} Más filtros{active ? ` · ${active}` : ''}</button>
+        {active > 0 && <button className="sec morebtn" onClick={clearAll}>Quitar filtros</button>}
       </div>
+      {more && (
+        <div className="filters more">
+          <label className="fl"><small>Arquetipo</small>
+            <select value={arch} onChange={(e) => setArch(e.target.value)} aria-label="Arquetipo">
+              <option value="">Cualquiera</option>
+              {ARCHETYPES.filter((a) => a.key !== 'rol').map((a) => <option key={a.key} value={a.key}>{a.label}</option>)}
+            </select>
+          </label>
+          <label className="fl"><small>Cupo</small>
+            <select value={cupo} onChange={(e) => setCupo(e.target.value)} aria-label="Cupo">
+              <option value="">Cualquiera</option>
+              <option value="NAC">Nacionales (NAC)</option>
+              <option value="COM">Comunitarios (COM)</option>
+              <option value="EXT">Extracomunitarios (EXT)</option>
+            </select>
+          </label>
+          <label className="fl"><small>Traspaso hasta</small>
+            <select value={maxFee} onChange={(e) => setMaxFee(Number(e.target.value))} aria-label="Precio máximo">
+              {[0, 100_000, 250_000, 500_000, 1_000_000, 2_000_000, 4_000_000].map((v) => <option key={v} value={v}>{v ? eur(v) : 'Sin límite'}</option>)}
+            </select>
+          </label>
+          <label className="fl"><small>Sueldo hasta</small>
+            <select value={maxSal} onChange={(e) => setMaxSal(Number(e.target.value))} aria-label="Sueldo máximo">
+              {[0, 50_000, 100_000, 200_000, 350_000, 500_000, 800_000].map((v) => <option key={v} value={v}>{v ? `${eur(v)}/año` : 'Sin límite'}</option>)}
+            </select>
+          </label>
+          <label className="fl"><small>Partidos jugados</small>
+            <select value={minGp} onChange={(e) => setMinGp(Number(e.target.value))} aria-label="Partidos mínimos">
+              {[0, 5, 10, 20].map((g) => (<option key={g} value={g}>{g ? `${g} o más` : 'Cualquiera'}</option>))}
+            </select>
+          </label>
+          <div className="fl full"><small>Atributos (mínimo)</small>
+            {conds.map(([k, v], i) => (
+              <span key={i} className="row tight cond">
+                <select value={k} onChange={(e) => setConds(conds.map((c, j) => (j === i ? [e.target.value as AttrKey, c[1]] : c)))} aria-label="Atributo">
+                  {ATTRS.map((a) => <option key={a.key} value={a.key}>{a.label}</option>)}
+                </select>
+                <select value={v} onChange={(e) => setConds(conds.map((c, j) => (j === i ? [c[0], Number(e.target.value)] : c)))} aria-label="Valor mínimo">
+                  {[50, 55, 60, 65, 70, 75, 80, 85, 90].map((x) => <option key={x} value={x}>≥ {x}</option>)}
+                </select>
+                <button className="sec" onClick={() => setConds(conds.filter((_, j) => j !== i))} aria-label="Quitar atributo">✕</button>
+              </span>
+            ))}
+            {conds.length < 4 && <button className="sec" onClick={() => setConds([...conds, ['sht3', 70]])}>+ Añadir atributo</button>}
+          </div>
+        </div>
+      )}
       <Tabs<Grp> small value={group} onChange={setGroup} options={[['basic', 'Básicas'], ['shoot', 'Tiro'], ['adv', 'Avanzadas'], ['market', 'Mercado']]} />
-      <Table id={`players-${group}`} cols={[...base, ...groups[group]]} rows={rows} rowKey={(r) => r.id} onRow={(r) => nav.player(r.id)} highlight={(r) => r.club_id === myClub}
+      <Table id={`players-${group}`} page={150} cols={[...base, ...groups[group]]} rows={rows} rowKey={(r) => r.id} onRow={(r) => nav.player(r.id)} highlight={(r) => r.club_id === myClub}
         defaultSort={group === 'market' ? { key: 'ovr', desc: true } : group === 'adv' ? { key: 'va', desc: true } : group === 'shoot' ? { key: 'ts', desc: true } : { key: 'pir', desc: true }} />
-      <p className="muted small">{rows.length} jugadores · por partido, fase regular (en Europa, toda la competición) · NAC nacional, COM comunitario, EXT extracomunitario (máx. 2 por plantilla, mín. 4 nacionales) · toca la cabecera para ordenar y un jugador para ver su ficha y negociar.</p>
+      {scope === 'ncaa' && <p className="muted small">Universitarios: no se pueden fichar hasta que acaban (normalmente con 22 o 23 años). Entonces los mejores van a la NBA y el resto sale al mercado.</p>}
+      <p className="muted small">{rows.length} jugadores · por partido, fase regular (en Europa, toda la competición; ligas extranjeras, NBA y NCAA en simulación rápida) · NAC nacional, COM comunitario, EXT extracomunitario (máx. 2 por plantilla, mín. 4 nacionales) · toca la cabecera para ordenar y un jugador para ver su ficha y negociar.</p>
       </>}
     </div>
   );
@@ -184,7 +272,7 @@ type Market = {
   club_id: number | null; salary: number | null; until: number | null; ask: number; value: number; yearsLeft: number; releaseCost: number; morale: number; injury_games: number;
   canRenew: boolean; marketOpen: boolean; phase: string; window: { open: boolean; label: string }; clause: number | null; age: number; preferredYears: number;
   loan: { owner_id: number; club_id: number; owner: string; club: string; share: number } | null;
-  patience: number; clubPatience: number; need: number; sellerWants: number | null; offers: { id: number; club: string; fee: number; expires_day: number }[];
+  patience: number; clubPatience: number; need: number; sellerWants: number | null; trusts?: boolean; offers: { id: number; club: string; fee: number; expires_day: number }[];
 };
 type Result = { ok: boolean; message: string; counter?: number; patience?: number };
 
@@ -235,6 +323,7 @@ export function ContractCard({ id, myClub, injury, onChanged }: { id: number; my
   const [squad, setSquad] = useState<SquadLite | null>(null);
   const [tv, setTv] = useState<{ offered: number; wanted: number } | null>(null);
   const [askMore, setAskMore] = useState<Record<number, number>>({});
+  const [promise, setPromise] = useState<string>('');
   if (!data) return <Loading error={error} />;
   const mine = data.club_id === myClub;
   const free = data.club_id === null;
@@ -290,6 +379,27 @@ export function ContractCard({ id, myClub, injury, onChanged }: { id: number; my
       <label className="row tight"><input type="checkbox" checked={clause !== null} onChange={(e) => setClause(e.target.checked ? Math.round((Math.max(data.value, 150_000) * 3) / 10_000) * 10_000 : null)} /> Cláusula de rescisión</label>
       {clause !== null && <MoneyInput label="Cláusula" value={clause} onChange={setClause} step={100_000} hint={`valor ${eur(data.value)}`} />}
       <p className="muted small">Una cláusula baja le gusta al jugador (pide algo menos) pero cualquier club puede pagarla y llevárselo. Muy alta (más de 4 veces su valor), pide más. Sin cláusula, nadie puede llevárselo sin tu permiso.</p>
+    </div>
+  );
+  const prom = promise ? (promise.startsWith('min') ? { kind: 'minutos' as const, minutes: Number(promise.slice(4)) } : { kind: promise as 'titular' | 'rotacion', minutes: 0 }) : null;
+  const promMin = prom ? (prom.kind === 'titular' ? 25 : prom.kind === 'rotacion' ? 17 : prom.minutes) : 0;
+  const promDisc = !prom ? 0 : data.trusts === false ? 0 : promMin >= 25 ? 10 : promMin >= 17 ? 5 : promMin >= 10 ? 2 : 0;
+  const promiseSel = (
+    <div className="promsel">
+      <label className="money">
+        <span>Promesa de papel <small className="muted">· pide menos si le prometes minutos</small></span>
+        <select value={promise} onChange={(e) => setPromise(e.target.value)} aria-label="Promesa">
+          <option value="">Sin promesa</option>
+          <option value="titular">Titular (unos 25 min) · −10 %</option>
+          <option value="rotacion">Rotación (unos 17 min) · −5 %</option>
+          <option value="min:30">30 minutos · −10 %</option>
+          <option value="min:20">20 minutos · −5 %</option>
+          <option value="min:12">12 minutos · −2 %</option>
+        </select>
+      </label>
+      {prom && (data.trusts === false
+        ? <p className="small bad">Ya le rompiste una promesa: no se la cree y no rebaja nada.</p>
+        : <p className="muted small">Con la promesa firmaría por unos {eur(Math.round((data.need * (1 - promDisc / 100)) / 5000) * 5000)}. Si durante la temporada juega bastante menos de {promMin} minutos, se enfadará y acabará pidiendo salir.</p>)}
     </div>
   );
   const counterBtn = (set: (x: number) => void) =>
@@ -361,8 +471,9 @@ export function ContractCard({ id, myClub, injury, onChanged }: { id: number; my
         <div className="card">
           <MoneyInput label="Sueldo por temporada" value={salary} onChange={setSalary} step={10_000} hint={`pide ${eur(data.need)}`} />
           {yearsSel}
+          {promiseSel}
           {clauseSel}
-          <div className="row"><button disabled={busy} onClick={() => run('sign', { clubId: myClub, salary, years, clause })}>Ofrecer contrato</button>{counterBtn(setSalary)}<button className="sec" onClick={() => setMode(null)}>Cancelar</button></div>
+          <div className="row"><button disabled={busy} onClick={() => run('sign', { clubId: myClub, salary, years, clause, promise: prom })}>Ofrecer contrato</button>{counterBtn(setSalary)}<button className="sec" onClick={() => setMode(null)}>Cancelar</button></div>
         </div>
       )}
       {mode === 'buy' && (
@@ -371,9 +482,10 @@ export function ContractCard({ id, myClub, injury, onChanged }: { id: number; my
           {data.clause !== null && <button className="sec" onClick={() => setFee(data.clause!)}>Pagar la cláusula ({eur(data.clause)})</button>}
           <MoneyInput label="Sueldo por temporada" value={salary} onChange={setSalary} step={10_000} hint={`pide ${eur(data.need)}`} />
           {yearsSel}
+          {promiseSel}
           {clauseSel}
           <p className="muted small">El traspaso sale de tu caja; el sueldo cuenta para tu presupuesto salarial. Primero decide el club y después el jugador. Cada oferta rechazada les gasta paciencia; si se agota, no negocian más esta ventana.</p>
-          <div className="row"><button disabled={busy} onClick={() => run('buy', { clubId: myClub, fee, salary, years, clause })}>Enviar oferta</button>{res?.message.includes('club') ? counterBtn(setFee) : counterBtn(setSalary)}<button className="sec" onClick={() => setMode(null)}>Cancelar</button></div>
+          <div className="row"><button disabled={busy} onClick={() => run('buy', { clubId: myClub, fee, salary, years, clause, promise: prom })}>Enviar oferta</button>{res?.message.includes('club') ? counterBtn(setFee) : counterBtn(setSalary)}<button className="sec" onClick={() => setMode(null)}>Cancelar</button></div>
         </div>
       )}
       {mode === 'trade' && (
@@ -400,9 +512,10 @@ export function ContractCard({ id, myClub, injury, onChanged }: { id: number; my
         <div className="card">
           <MoneyInput label="Sueldo por temporada" value={salary} onChange={setSalary} step={10_000} hint={`pide ${eur(data.need)}`} />
           {yearsSel}
+          {promiseSel}
           {clauseSel}
           <p className="muted small">Los años se suman al contrato actual. Contento, pide algo menos; descontento, más.</p>
-          <div className="row"><button disabled={busy} onClick={() => run('renew', { salary, years, clause })}>Ofrecer renovación</button>{counterBtn(setSalary)}<button className="sec" onClick={() => setMode(null)}>Cancelar</button></div>
+          <div className="row"><button disabled={busy} onClick={() => run('renew', { salary, years, clause, promise: prom })}>Ofrecer renovación</button>{counterBtn(setSalary)}<button className="sec" onClick={() => setMode(null)}>Cancelar</button></div>
         </div>
       )}
       {mode === 'sell' && (
@@ -450,6 +563,16 @@ export function FinanceScreen({ clubId, nav }: { clubId: number; nav: Nav }) {
           <div><div className={`kv ${data.club.cash < 0 ? 'bad' : ''}`}>{eur(data.club.cash)}</div><div className="kk">Caja para traspasos</div></div>
         </div>
         <p className="muted small">El margen salarial que no gastes pasa a la caja al acabar la temporada. Los premios (playoffs, final, título) también. Con deudas, el presupuesto del año siguiente baja.</p>
+      </section>
+      <section>
+        <h3>Ingresos y gastos</h3>
+        <div className="kpis">
+          <div><div className="kv good">{eur(data.income.gate)}</div><div className="kk">Taquilla hasta hoy</div></div>
+          <div><div className="kv">{eur(data.income.sponsor)}</div><div className="kk">Patrocinio previsto ({Math.round(data.income.winPct * 100)} % de victorias)</div></div>
+          <div><div className="kv bad">−{eur(data.income.costs)}</div><div className="kk">Gastos fijos</div></div>
+          <div><div className={`kv ${data.income.gate + data.income.sponsor - data.income.costs < 0 ? 'bad' : 'good'}`}>{eur(data.income.gate + data.income.sponsor - data.income.costs)}</div><div className="kk">Balance (sin premios)</div></div>
+        </div>
+        <p className="muted small">Cada partido en casa deja taquilla: más con buena racha, rivales grandes y en playoffs. El patrocinio se cobra al final según las victorias y los gastos fijos son una cuarta parte del presupuesto. Lo que ganes así sube el presupuesto de la temporada siguiente; si pierdes dinero, baja.</p>
       </section>
       {expiring.length > 0 && (
         <section>
@@ -501,7 +624,10 @@ export function FinanceScreen({ clubId, nav }: { clubId: number; nav: Nav }) {
               { key: 's', label: 'Temp.', left: true, value: (r: Record<string, number>) => r.season!, render: (r) => seasonLabel(r.season!) },
               { key: 'b', label: 'Presupuesto', value: (r) => r.budget!, render: (r) => eur(r.budget) },
               { key: 'w', label: 'Sueldos', value: (r) => r.wages!, render: (r) => eur(r.wages) },
+              { key: 'g', label: 'Taquilla', value: (r) => r.gate ?? 0, render: (r) => eur(r.gate ?? 0) },
+              { key: 'sp', label: 'Patrocinio', value: (r) => r.sponsor ?? 0, render: (r) => eur(r.sponsor ?? 0) },
               { key: 'p', label: 'Premios', value: (r) => r.prizes!, render: (r) => eur(r.prizes) },
+              { key: 'co', label: 'Gastos', value: (r) => r.costs ?? 0, render: (r) => eur(r.costs ?? 0) },
               { key: 'c', label: 'Caja final', value: (r) => r.cash_end!, render: (r) => eur(r.cash_end) },
             ]}
             rows={data.history as Record<string, number>[]}

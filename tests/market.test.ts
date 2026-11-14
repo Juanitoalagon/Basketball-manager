@@ -27,7 +27,7 @@ describe('economía', () => {
     expect(marketValue({ ovr: 70, age: 27, potential_est: 70, morale: 70 }, 0)).toBeLessThan(marketValue({ ovr: 70, age: 27, potential_est: 70, morale: 70 }, 2));
   });
   it('todos los clubes empiezan con presupuesto para su plantilla y algo de caja', () => {
-    for (const c of db.rows<{ id: number; budget: number; cash: number }>('SELECT id, budget, cash FROM club')) {
+    for (const c of db.rows<{ id: number; budget: number; cash: number }>('SELECT id, budget, cash FROM club WHERE competition_id IS NOT 13')) {
       expect(c.budget).toBeGreaterThanOrEqual(payroll(db, c.id));
       expect(c.cash).toBeGreaterThan(0);
     }
@@ -89,7 +89,7 @@ describe('varias temporadas con mercado, lesiones y moral', () => {
       expect(Math.min(...sizes)).toBeGreaterThanOrEqual(12);
       expect(Math.max(...sizes)).toBeLessThanOrEqual(16);
       // Todo jugador con club tiene contrato vigente y viceversa.
-      expect(one('SELECT COUNT(*) FROM player p LEFT JOIN contract c ON c.player_id = p.id WHERE p.club_id IS NOT NULL AND p.retired = 0 AND c.player_id IS NULL')).toBe(0);
+      expect(one('SELECT COUNT(*) FROM player p LEFT JOIN contract c ON c.player_id = p.id WHERE p.club_id IS NOT NULL AND p.retired = 0 AND c.player_id IS NULL AND p.club_id NOT IN (SELECT id FROM club WHERE competition_id = 13)')).toBe(0);
       expect(one('SELECT COUNT(*) FROM contract c JOIN player p ON p.id = c.player_id WHERE p.club_id IS NOT c.club_id')).toBe(0);
       expect(one('SELECT COUNT(*) FROM contract WHERE until < (SELECT game_season FROM universe)')).toBe(0);
       const fa = one('SELECT COUNT(*) FROM player WHERE club_id IS NULL AND retired = 0 AND youth = 0');
@@ -97,7 +97,7 @@ describe('varias temporadas con mercado, lesiones y moral', () => {
       expect(fa).toBeLessThan(250);
     }
     expect(getUniverse(db)!.game_season).toBe(2029);
-    expect(one('SELECT COUNT(*) FROM club_season_finance')).toBe(72 * 3);
+    expect(one('SELECT COUNT(*) FROM club_season_finance WHERE club_id <= 72')).toBe(72 * 3);
     // Nadie se arruina sin control.
     expect(one('SELECT MIN(cash) FROM club WHERE id <> ?', [ME])).toBeGreaterThan(-2_000_000);
   }, 180_000);

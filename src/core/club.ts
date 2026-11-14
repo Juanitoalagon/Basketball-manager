@@ -8,6 +8,8 @@
  *  - cesiones.
  * Las fórmulas están en FORMULAS.md.
  */
+import { NCAA_MSG, isNcaaClub } from './leagues';
+import { reviewPromises, trackUnhappiness } from './promises';
 import { ATTRS, ATTR_KEYS, type AttrKey, type Attrs, POSITIONS, type Pos, overallAt } from './attributes';
 import { type ArchetypeKey, archetypeKeys } from './archetype';
 import { DEFAULT_TACTICS, DEF_C, DEF_SYS, OFF_C, OFF_SYS, type DefSystem, type EnginePlayer, type OffSystem, type Pace, type Tactics, defFitOf, offFitOf } from './engine';
@@ -40,7 +42,7 @@ export function expectedRole(rank: number, age: number): RoleKey {
 /** Minutos medios de cada jugador en los últimos 5 partidos de su club. */
 function recentMinutes(db: Db, clubId: number): Map<number, number> {
   const games = db.rows<{ id: number }>(
-    "SELECT id FROM game WHERE (home_id = ? OR away_id = ?) AND status = 'jugado' ORDER BY season DESC, day DESC LIMIT 5",
+    "SELECT id FROM game WHERE (home_id = ? OR away_id = ?) AND status = 'jugado' AND competition_id <= 6 ORDER BY season DESC, day DESC LIMIT 5",
     [clubId, clubId],
   ).map((g) => g.id);
   const out = new Map<number, number>();
@@ -64,23 +66,28 @@ export function updateMorale(db: Db, clubId: number, won: boolean, intensityMora
   );
   const mins = recentMinutes(db, clubId);
   const chem = db.rows<{ chemistry: number }>('SELECT chemistry FROM club WHERE id = ?', [clubId])[0]?.chemistry ?? 50;
+  // Promesas del club del usuario (minutos prometidos al fichar o renovar).
+  const injured = new Set(db.rows<{ id: number }>('SELECT id FROM player WHERE club_id = ? AND injury_games > 0', [clubId]).map((x) => x.id));
+  const promised = clubId === userClub ? reviewPromises(db, clubId, mins, injured) : new Map<number, { delta: number; note: string | null }>();
   roster.forEach((p, rank) => {
     const role = expectedRole(rank, u.game_season - p.birth_year);
     const exp = ROLE_INFO[role].min;
     const got = mins.get(p.id) ?? 0;
     const minPart = Math.max(-2.2, Math.min(1.2, (got - exp) / 5));
     const result = (won ? 2.5 : -2.5) * (rank < 8 ? 1 : 0.5);
-    let m = p.morale + result + minPart + intensityMorale + (chem - 50) / 50;
+    const pr = promised.get(p.id);
+    let m = p.morale + result + minPart + intensityMorale + (chem - 50) / 50 + (pr?.delta ?? 0);
     m += (68 - m) * 0.05; // vuelve poco a poco a lo normal
     m = Math.round(Math.max(0, Math.min(100, m)));
-    const note = got < exp - 6
+    const note = pr?.note ?? (got < exp - 6
       ? `Quiere más minutos: juega ${got.toFixed(0)} y espera unos ${exp} como ${ROLE_INFO[role].label.toLowerCase()}`
       : got > exp + 8 && rank >= 8
         ? `Encantado: juega más de lo que esperaba (${got.toFixed(0)} min)`
-        : m < 40 ? 'Desanimado por los resultados' : m >= 75 ? 'Contento con su papel' : 'Normal';
+        : m < 40 ? 'Desanimado por los resultados' : m >= 75 ? 'Contento con su papel' : 'Normal');
     db.exec('UPDATE player SET morale = ?, mood_note = ? WHERE id = ?', [m, note, p.id]);
-    if (clubId === userClub && p.morale >= 40 && m < 40 && rank < 10) {
-      addNews(db, 'moral', `${p.name} está descontento: ${note.charAt(0).toLowerCase()}${note.slice(1)}.`, clubId, p.id, { type: 'player', id: p.id });
+    if (clubId === userClub) {
+      if (p.morale >= 40 && m < 40 && rank < 10) addNews(db, 'moral', `${p.name} está descontento: ${note.charAt(0).toLowerCase()}${note.slice(1)}.`, clubId, p.id, { type: 'player', id: p.id });
+      trackUnhappiness(db, clubId, p.id, p.name, m);
     }
   });
 }
@@ -159,7 +166,7 @@ export const OBJECTIVE_LABEL: Record<string, string> = {
   playoffs: 'Entrar en los playoffs (top 8)',
   mitad: 'Acabar en la mitad alta (top 9 de 18)',
   salvacion: 'Evitar el descenso',
-  ascenso: 'Ascender a la Liga ACB (1º)',
+  ascenso: 'Ascender a la Liga ACB (top 2)',
   meritorio: 'Acabar entre los 6 primeros',
 };
 /** Objetivo de cada club español según su presupuesto dentro de su liga. */
@@ -192,8 +199,8 @@ export function evaluateObjectives(db: Db, season: number, userClub: number | nu
       case 'titulo': res = won(o.club_id, [1]) && won(o.club_id, [3]) ? 'superado' : won(o.club_id, [1, 3, 4]) ? 'cumplido' : 'fallado'; break;
       case 'playoffs': res = semis.has(o.club_id) || final(o.club_id) || won(o.club_id, [1, 3]) ? 'superado' : posA > 0 && posA <= 8 ? 'cumplido' : 'fallado'; break;
       case 'mitad': res = (posA > 0 && posA <= 8) || (posF > 0 && posF <= 3) ? 'superado' : (posA > 0 && posA <= 9) || (posF > 0 && posF <= 9) ? 'cumplido' : 'fallado'; break;
-      case 'salvacion': res = posA > 0 && posA <= 12 ? 'superado' : posA > 0 && posA < 18 ? 'cumplido' : 'fallado'; break;
-      case 'ascenso': res = posF === 1 ? 'superado' : posF > 0 && posF <= 3 ? 'cumplido' : 'fallado'; break;
+      case 'salvacion': res = posA > 0 && posA <= 12 ? 'superado' : posA > 0 && posA <= acb.length - 2 ? 'cumplido' : 'fallado'; break;
+      case 'ascenso': res = posF === 1 ? 'superado' : posF > 0 && posF <= 2 ? 'cumplido' : 'fallado'; break;
       default: res = posF > 0 && posF <= 3 ? 'superado' : posF > 0 && posF <= 6 ? 'cumplido' : 'fallado';
     }
     const delta = res === 'superado' ? 0.12 : res === 'cumplido' ? 0.05 : -0.08;
@@ -320,6 +327,7 @@ export function loanOut(db: Db, playerId: number, toClub: number): MarketResult 
   const club = db.rows<{ name: string }>('SELECT name FROM club WHERE id = ?', [toClub])[0]!.name;
   transaction(db, () => {
     db.exec('INSERT INTO loan (player_id, owner_id, club_id, season, share, day) VALUES (?,?,?,?,?,?)', [playerId, p.club_id, toClub, u.game_season, opt.share, u.game_day]);
+    db.exec("INSERT INTO transfer (season, day, player_id, from_club, to_club, fee, salary, until, kind) VALUES (?,?,?,?,?,0,NULL,NULL,'cesion')", [u.game_season, u.game_day, playerId, p.club_id, toClub]);
     db.exec('UPDATE player SET club_id = ? WHERE id = ?', [toClub, playerId]);
     db.exec('DELETE FROM lineup WHERE player_id = ?', [playerId]);
     db.exec('DELETE FROM player_tendency WHERE player_id = ?', [playerId]);
@@ -335,6 +343,7 @@ export function loanIn(db: Db, playerId: number, share: number): MarketResult {
   if (!w.open) return { ok: false, message: `${w.label}. Las cesiones se hacen con el mercado abierto.` };
   const p = db.rows<{ name: string; club_id: number | null; nationality: string; salary: number | null }>('SELECT p.name, p.club_id, p.nationality, c.salary FROM player p LEFT JOIN contract c ON c.player_id = p.id WHERE p.id = ?', [playerId])[0];
   if (!p || p.club_id === null || p.club_id === u.user_club_id) return { ok: false, message: 'No se puede pedir cedido.' };
+  if (isNcaaClub(db, p.club_id)) return { ok: false, message: NCAA_MSG };
   if (db.rows('SELECT 1 FROM loan WHERE player_id = ?', [playerId]).length) return { ok: false, message: 'Ya está cedido.' };
   const r = roster(db, p.club_id, u.game_season);
   const rank = r.findIndex((x) => x.id === playerId);
@@ -348,6 +357,7 @@ export function loanIn(db: Db, playerId: number, share: number): MarketResult {
   if (payroll(db, u.user_club_id!) + (p.salary ?? 0) * share > budget) return { ok: false, message: 'Su parte del sueldo no cabe en tu presupuesto.' };
   transaction(db, () => {
     db.exec('INSERT INTO loan (player_id, owner_id, club_id, season, share, day) VALUES (?,?,?,?,?,?)', [playerId, p.club_id, u.user_club_id, u.game_season, share, u.game_day]);
+    db.exec("INSERT INTO transfer (season, day, player_id, from_club, to_club, fee, salary, until, kind) VALUES (?,?,?,?,?,0,NULL,NULL,'cesion')", [u.game_season, u.game_day, playerId, p.club_id, u.user_club_id]);
     db.exec('UPDATE player SET club_id = ? WHERE id = ?', [u.user_club_id, playerId]);
     db.exec('DELETE FROM lineup WHERE player_id = ?', [playerId]);
     addNews(db, 'cesion', `${p.name} llega cedido hasta final de temporada (pagas el ${Math.round(share * 100)} % de su sueldo).`, u.user_club_id, playerId, { type: 'player', id: playerId });

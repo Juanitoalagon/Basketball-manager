@@ -6,11 +6,13 @@ import { deflateSync, strToU8 } from 'fflate';
 import { ATTR_KEYS, type Attrs, type NewPlayer, type Pos, developAttrs, overall, makePotential } from './attributes';
 import { BOX_FIELDS, type EngineTeam, type Intervention, type Level, type Role, type Tactics, type TendKey, simulateGame } from './engine';
 import { ROSTER_SIZE, TIER_QUALITY, generateProspect, generateRoster } from './generate';
-import { REAL_CLUBS } from './names';
+import { CUPO_RULES, REAL_CLUBS, cupoOf } from './names';
 import { computeAwards } from './awards';
 import { addFatigue, aiTactics, endLoans, evaluateObjectives, individualBonus, minutesDevelopment, recoverFatigue, setObjectives, updateChemistry, updateMorale } from './club';
+import { creditGate } from './finance';
+import { NBA, NCAA, collegeExit, leaguesRefill, progressFast, scheduleFast } from './leagues';
 import { addFreeAgents, addNews, assignClauses, ensureEconomy, offseason, rookieContract } from './market';
-import { INTENSITY, aiFillNeeds, positionNeeds, afterDay, fixRosterCupos, getTraining, scheduleEurope, setupWorld, trainingBonus, youthOffseason } from './world';
+import { INTENSITY, aiFillNeeds, isSpanishClub, positionNeeds, afterDay, fixRosterCupos, getTraining, scheduleEurope, setupWorld, trainingBonus, youthOffseason } from './world';
 import { Rng, mixSeed } from './rng';
 import { type Db, ENGINE_VERSION, GAME_TABLES, bumpRevision, setSetting, transaction } from './schema';
 import { dateOfDay, nextKoDay, seasonCalendar } from './calendar';
@@ -134,6 +136,7 @@ export function createUniverse(db: Db, opts: { name: string; seed: number; id: s
     ensureEconomy(db);
     seasonSetup(db, season, null, new Rng(mixSeed(opts.seed, 4711)));
     db.exec("INSERT INTO settings(key, value) VALUES ('revision', '0') ON CONFLICT(key) DO UPDATE SET value = '0'");
+    setSetting(db, 'econ', '2');
   });
   return getUniverse(db)!;
 }
@@ -182,12 +185,32 @@ export function refreshAiTactics(db: Db, season: number, userClub: number | null
   }
 }
 
-export function loadTeam(db: Db, clubId: number, season: number): EngineTeam {
-  const rows = db.rows<Record<string, number | string | null>>(
-    `SELECT p.id, p.pos1, p.pos2, p.height_cm, p.morale, p.fatigue, a.* FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
-     WHERE p.club_id = ? AND p.retired = 0 AND p.injury_games = 0 ORDER BY a.ovr DESC LIMIT 16`,
+/**
+ * Jugadores convocables de un club para un partido. En las competiciones españolas (ACB, FEB y Copa) un club
+ * español solo puede convocar a 2 extracomunitarios: entran los que el entrenador no ha dejado fuera, primero
+ * los titulares elegidos y después por media. En Europa no hay límite.
+ */
+export function convocados(db: Db, clubId: number, season: number, comp: number | null): Record<string, number | string | null>[] {
+  let rows = db.rows<Record<string, number | string | null>>(
+    `SELECT p.id, p.pos1, p.pos2, p.height_cm, p.morale, p.fatigue, p.nationality, p.wants_out, a.* FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
+     WHERE p.club_id = ? AND p.retired = 0 AND p.injury_games = 0 ORDER BY a.ovr DESC LIMIT 18`,
     [season, clubId],
   );
+  if (comp !== null && comp <= 3 && isSpanishClub(db, clubId)) {
+    const lu = new Map(db.rows<{ player_id: number; slot: number | null; role: string }>('SELECT player_id, slot, role FROM lineup WHERE club_id = ?', [clubId]).map((l) => [l.player_id, l]));
+    const ext = rows.filter((r) => cupoOf(String(r.nationality)) === 'EXT');
+    const pri = (r: Record<string, number | string | null>) => {
+      const l = lu.get(Number(r.id));
+      return (l?.role === 'fuera' ? 0 : 100) + (l?.slot !== null && l?.slot !== undefined ? 50 : 0) + Number(r.ovr) / 10;
+    };
+    const keep = new Set(ext.sort((a, b) => pri(b) - pri(a)).slice(0, CUPO_RULES.maxExt).map((r) => Number(r.id)));
+    rows = rows.filter((r) => cupoOf(String(r.nationality)) !== 'EXT' || keep.has(Number(r.id)));
+  }
+  return rows.slice(0, 16);
+}
+
+export function loadTeam(db: Db, clubId: number, season: number, comp: number | null = null): EngineTeam {
+  const rows = convocados(db, clubId, season, comp);
   const lu = db.rows<{ player_id: number; slot: number | null; role: Role; shoot: Level; minutes: number | null }>('SELECT player_id, slot, role, shoot, minutes FROM lineup WHERE club_id = ?', [clubId]);
   const isUser = db.rows<{ u: number | null }>('SELECT user_club_id AS u FROM universe')[0]?.u === clubId;
   const chemistry = db.rows<{ c: number }>('SELECT chemistry AS c FROM club WHERE id = ?', [clubId])[0]?.c ?? 50;
@@ -221,7 +244,8 @@ export function loadTeam(db: Db, clubId: number, season: number): EngineTeam {
       pos2: (r.pos2 as Pos | null) ?? null,
       height_cm: Number(r.height_cm),
       morale: Number(r.morale),
-      attrs: Object.fromEntries(ATTR_KEYS.map((k) => [k, Number(r[k])])) as Attrs,
+      // Quien ha pedido salir rinde algo menos (−3 en todo).
+      attrs: Object.fromEntries(ATTR_KEYS.map((k) => [k, Number(r[k]) - (Number(r.wants_out ?? 0) ? 3 : 0)])) as Attrs,
       tend: tend.get(Number(r.id)),
       fatigue: Number(r.fatigue ?? 0),
     })),
@@ -254,8 +278,8 @@ export function prepareLive(db: Db, gameId?: number) {
   );
   const g = options.find((x) => x.id === gameId) ?? options[0];
   if (!g) return null;
-  const home = loadTeam(db, g.home_id, u.game_season);
-  const away = loadTeam(db, g.away_id, u.game_season);
+  const home = loadTeam(db, g.home_id, u.game_season, g.competition_id);
+  const away = loadTeam(db, g.away_id, u.game_season, g.competition_id);
   const ids = [...home.players, ...away.players].map((p) => p.id);
   const people = db.rows<{ id: number; name: string; number: number | null; pos1: string; ovr: number; nationality: string; birth_year: number; origin: string }>(
     `SELECT p.id, p.name, p.number, p.pos1, a.ovr, p.nationality, p.birth_year, p.origin FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ? WHERE p.id IN (${ids.join(',') || 0})`,
@@ -300,7 +324,7 @@ export function advanceDay(db: Db, opts: { interventions?: Intervention[]; liveG
     const liveId = opts.liveGameId ?? games.find((g) => g.home_id === u.user_club_id || g.away_id === u.user_club_id)?.id;
     for (const g of games) {
       const isUser = g.home_id === u.user_club_id || g.away_id === u.user_club_id;
-      const r = simulateGame(loadTeam(db, g.home_id, season), loadTeam(db, g.away_id, season), mixSeed(u.seed, g.seed), { pbp: isUser, interventions: isUser && g.id === liveId ? opts.interventions : undefined });
+      const r = simulateGame(loadTeam(db, g.home_id, season, g.competition_id), loadTeam(db, g.away_id, season, g.competition_id), mixSeed(u.seed, g.seed), { pbp: isUser, interventions: isUser && g.id === liveId ? opts.interventions : undefined });
       saveGame(db, g, season, r);
       afterGame(db, g, r, u.user_club_id, mixSeed(u.seed, g.seed + 17));
       addFatigue(db, r.box);
@@ -315,11 +339,20 @@ export function advanceDay(db: Db, opts: { interventions?: Intervention[]; liveG
     const stage = games.find((g) => g.competition_id <= 2)?.stage ?? games[0]?.stage ?? 'regular';
     let seasonOver = false;
     events.push(...afterDay(db, season, next, u.seed, stagesPlayed, compsPlayed));
+    // Ligas extranjeras, NBA y NCAA: lo que toque hasta la fecha de hoy.
+    if (nextDate) events.push(...progressFast(db, season, nextDate).slice(0, 4));
     if (stagesPlayed.has('playoffs')) {
       const res = scheduleKnockout(db, season, COMP.ACB, nextKoDay(season, COMP.ACB, next), u.seed, next);
       events.push(...res.events);
       if (res.finished) {
+        // Lo que quede de las ligas rápidas se juega antes de cerrar la temporada.
+        events.push(...progressFast(db, season, '9999-12-31'));
         db.exec("UPDATE universe SET phase = 'fin'");
+        // Verano: tres meses sin partidos curan casi todas las lesiones (cada mes ≈ 13 partidos).
+        const healed = db.rows<{ id: number; name: string }>('SELECT id, name FROM player WHERE club_id = ? AND injury_games > 0 AND injury_games <= 40', [u.user_club_id]);
+        db.exec('UPDATE player SET injury_games = MAX(0, injury_games - 40)');
+        db.exec('UPDATE player SET injury = NULL WHERE injury_games = 0');
+        if (healed.length) events.push(`El verano cura las lesiones de ${healed.map((h) => h.name).join(', ')}.`);
         db.exec("UPDATE season SET status = 'cerrada' WHERE year = ?", [season]);
         events.push(...computeAwards(db, season));
         events.push(...evaluateObjectives(db, season, u.user_club_id));
@@ -353,6 +386,7 @@ const INJURIES: [number, number, string][] = [
  */
 function afterGame(db: Db, g: GameRow, r: ReturnType<typeof simulateGame>, userClub: number | null, seed: number) {
   const rng = new Rng(seed);
+  creditGate(db, getUniverse(db)!.game_season, g.home_id, g.away_id, g.stage);
   for (const [side, club] of [[0, g.home_id], [1, g.away_id]] as const) {
     const inten = INTENSITY[getTraining(db, club).intensity];
     // Los que ya estaban lesionados cumplen un partido de baja.
@@ -390,6 +424,18 @@ function afterGame(db: Db, g: GameRow, r: ReturnType<typeof simulateGame>, userC
 function saveGame(db: Db, g: GameRow, season: number, r: ReturnType<typeof simulateGame>) {
   db.exec("UPDATE game SET home_pts = ?, away_pts = ?, ot = ?, engine_version = ?, status = 'jugado' WHERE id = ?", [r.score[0], r.score[1], r.ot, ENGINE_VERSION, g.id]);
   const clubOf = (side: 0 | 1) => (side === 0 ? g.home_id : g.away_id);
+  // Quintetos del usuario: minutos y puntos a favor y en contra de cada cinco que ha estado en pista.
+  const userClub = db.rows<{ u: number | null }>('SELECT user_club_id AS u FROM universe')[0]?.u ?? null;
+  for (const sd of [0, 1] as const) {
+    if (clubOf(sd) !== userClub || !r.units) continue;
+    for (const [five, [sec, pf, pa]] of r.units[sd]) {
+      if (sec! < 5) continue;
+      db.exec(
+        'INSERT INTO lineup_unit (season, club_id, five, sec, pf, pa, games) VALUES (?,?,?,?,?,?,1) ON CONFLICT(season, club_id, five) DO UPDATE SET sec = sec + excluded.sec, pf = pf + excluded.pf, pa = pa + excluded.pa, games = games + 1',
+        [season, clubOf(sd), five, Math.round(sec!), pf, pa],
+      );
+    }
+  }
   const team: [number[], number[]] = [new Array(BOX_FIELDS.length).fill(0), new Array(BOX_FIELDS.length).fill(0)];
   for (const [pid, b] of r.box) {
     const side = r.side.get(pid)!;
@@ -461,7 +507,7 @@ function closeRegularSeason(db: Db, season: number): string[] {
   const ev: string[] = [];
   const feb = standings(db, season, COMP.FEB);
   db.exec('INSERT OR REPLACE INTO season_result (season, competition_id, champion_id, regular_first_id) VALUES (?,?,?,?)', [season, COMP.FEB, feb[0]!.club_id, feb[0]!.club_id]);
-  ev.push(`${feb[0]!.name} gana la Primera FEB y asciende.`);
+  ev.push(`${feb[0]!.name} gana la Primera FEB; sube a la ACB junto a ${feb[1]?.name ?? '—'}.`);
   const acb = standings(db, season, COMP.ACB);
   db.exec('INSERT OR REPLACE INTO season_result (season, competition_id, regular_first_id) VALUES (?,?,?)', [season, COMP.ACB, acb[0]!.club_id]);
   ev.push(`${acb[0]!.name} acaba líder de la fase regular de la ACB. Empiezan los playoffs.`);
@@ -471,7 +517,7 @@ function closeRegularSeason(db: Db, season: number): string[] {
       season, COMP.ACB, slot, acb[hi! - 1]!.club_id, acb[lo! - 1]!.club_id, hi, lo,
     ]);
   });
-  const lastDay = db.rows<{ d: number }>('SELECT MAX(day) AS d FROM game WHERE season = ?', [season])[0]!.d;
+  const lastDay = db.rows<{ d: number }>('SELECT MAX(day) AS d FROM game WHERE season = ? AND competition_id <= 6', [season])[0]!.d;
   const firstPo = seasonCalendar(season).playoffs.find((d) => d > lastDay) ?? lastDay + 1;
   const u = getUniverse(db)!;
   scheduleKnockout(db, season, COMP.ACB, firstPo, u.seed);
@@ -546,6 +592,9 @@ export function scheduleKnockout(db: Db, season: number, comp: number, day: numb
 }
 
 /** Nueva temporada: evolución, retiradas, cantera, ascenso y descenso, y calendario nuevo. */
+/** Clubes que suben de la Primera FEB a la ACB (y bajan de la ACB) cada temporada. */
+export const PROMOTED = 2;
+
 export function startNewSeason(db: Db): { season: number; retired: number; prospects: number; events: string[] } {
   const u = getUniverse(db)!;
   if (u.phase !== 'fin') throw new Error('La temporada todavía no ha terminado.');
@@ -556,14 +605,14 @@ export function startNewSeason(db: Db): { season: number; retired: number; prosp
   let retired = 0;
   let prospects = 0;
   return transaction(db, () => {
-    // Ascenso y descenso directo: último de la ACB por el primero de la FEB.
+    // Ascensos y descensos: los dos últimos de la ACB por los dos primeros de la Primera FEB.
     const acb = standings(db, old, COMP.ACB);
     const feb = standings(db, old, COMP.FEB);
-    const down = acb[acb.length - 1]!;
-    const up = feb[0]!;
-    db.exec('UPDATE club SET competition_id = ? WHERE id = ?', [COMP.FEB, down.club_id]);
-    db.exec('UPDATE club SET competition_id = ? WHERE id = ?', [COMP.ACB, up.club_id]);
-    events.push(`${up.name} sube a la ACB; ${down.name} baja a la Primera FEB.`);
+    const downs = acb.slice(-PROMOTED);
+    const ups = feb.slice(0, PROMOTED);
+    for (const d of downs) db.exec('UPDATE club SET competition_id = ? WHERE id = ?', [COMP.FEB, d.club_id]);
+    for (const up of ups) db.exec('UPDATE club SET competition_id = ? WHERE id = ?', [COMP.ACB, up.club_id]);
+    events.push(`${ups.map((x) => x.name).join(' y ')} suben a la ACB; ${downs.map((x) => x.name).join(' y ')} bajan a la Primera FEB.`);
     // Los cedidos vuelven a su club antes de la evolución y de los contratos.
     endLoans(db, u.user_club_id, events);
     // Minutos por partido de la temporada que acaba (para el desarrollo de los jóvenes).
@@ -610,14 +659,21 @@ export function startNewSeason(db: Db): { season: number; retired: number; prosp
       const est = makePotential(rng, nOvr, age);
       db.exec('UPDATE player SET potential = ?, potential_est = ? WHERE id = ?', [pot, Math.max(nOvr, Math.round((est.potentialEst + pot) / 2)), r.id]);
     }
+    // Universitarios que acaban: draft NBA y agentes libres.
+    collegeExit(db, old, season, rng, events);
     // Lesiones: el verano cura casi todo.
-    db.exec('UPDATE player SET injury_games = MAX(0, injury_games - 12)');
+    db.exec('UPDATE player SET injury_games = MAX(0, injury_games - 40)');
     db.exec('UPDATE player SET injury = NULL WHERE injury_games = 0');
     // Agentes libres que siguen sin equipo también evolucionan (ya lo hicieron arriba si tenían atributos).
     offseason(db, old, season, u.user_club_id, events);
+    // Presupuesto de los que cambian de categoría: el recién ascendido recibe algo menos que el más modesto
+    // de la ACB (y nunca menos de lo que ya tenía); el que baja pierde un 40 %.
+    const minAcb = db.rows<{ m: number | null }>(`SELECT MIN(budget) AS m FROM club WHERE competition_id = 1 AND id NOT IN (${ups.map((x) => x.club_id).join(',') || 0})`)[0]?.m ?? 0;
+    for (const up of ups) db.exec('UPDATE club SET budget = MAX(budget, ?) WHERE id = ?', [Math.round((Number(minAcb) * 0.85) / 50_000) * 50_000, up.club_id]);
+    for (const d of downs) db.exec('UPDATE club SET budget = ROUND(budget * 0.6 / 50000) * 50000 WHERE id = ?', [d.club_id]);
     // Rellenar plantillas con jóvenes de cantera.
     const used = new Set(db.rows<{ name: string }>('SELECT name FROM player').map((p) => p.name));
-    for (const c of db.rows<{ id: number; competition_id: number }>('SELECT id, competition_id FROM club')) {
+    for (const c of db.rows<{ id: number; competition_id: number }>(`SELECT id, competition_id FROM club WHERE competition_id IS NULL OR competition_id NOT IN (${NBA}, ${NCAA})`)) {
       const nums = new Set(db.rows<{ number: number }>('SELECT number FROM player WHERE club_id = ? AND retired = 0', [c.id]).map((x) => x.number));
       let n = db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [c.id])[0]!.n;
       while (n < ROSTER_SIZE) {
@@ -628,6 +684,7 @@ export function startNewSeason(db: Db): { season: number; retired: number; prosp
         prospects++;
       }
     }
+    leaguesRefill(db, season, rng);
     youthOffseason(db, season, u.user_club_id, rng, events);
     aiFillNeeds(db, season, u.user_club_id, rng, events);
     // Que siempre quede un mercado de agentes libres con el que trabajar.
@@ -636,8 +693,11 @@ export function startNewSeason(db: Db): { season: number; retired: number; prosp
     scheduleSeason(db, season, u.seed);
     setupWorld(db);
     scheduleEurope(db, season, u.seed);
+    scheduleFast(db, season, u.seed);
     db.exec("UPDATE universe SET game_season = ?, game_day = 0, phase = 'regular'", [season]);
-    db.exec('UPDATE player SET fatigue = 0');
+    db.exec('UPDATE player SET fatigue = 0, unhappy = 0');
+    // Las promesas valen una temporada; las rotas se recuerdan (ya no se fía).
+    db.exec('DELETE FROM promise WHERE season < ? AND broken = 0', [season]);
     setObjectives(db, season);
     refreshAiTactics(db, season, u.user_club_id, rng);
     updateChemistry(db, season);

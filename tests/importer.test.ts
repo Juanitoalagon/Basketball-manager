@@ -50,7 +50,7 @@ describe('importador de SuperManagerLab', () => {
     expect(s.seasons.length).toBe(2);
     chooseClub(db, 1);
     advanceDay(db); // con dos clubes reales, la jornada 1 tiene un partido ACB y nueve FEB
-    expect(one("SELECT COUNT(*) FROM game WHERE status = 'jugado'")).toBe(10);
+    expect(one("SELECT COUNT(*) FROM game WHERE status = 'jugado' AND competition_id <= 2")).toBe(10);
     // Lo simulado no toca lo real.
     expect(one('SELECT COUNT(*) FROM real_game_line')).toBe(24 * 3 + 1);
   });

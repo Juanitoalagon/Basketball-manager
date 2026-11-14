@@ -1,5 +1,9 @@
 /** Previa de un partido: cómo llegan los dos equipos, sus mejores jugadores y cómo juegan. */
+import { useState } from 'react';
 import type * as Q from '../core/queries';
+import type * as SC from '../core/scouting';
+import type { Tactics } from '../core/engine';
+import { call } from '../db/client';
 import { Face } from './Face';
 import { Loading, type Nav, f1, pc, shortName, useData } from './kit';
 
@@ -70,7 +74,43 @@ function TeamCard({ t, nav }: { t: TeamP; nav: Nav }) {
   );
 }
 
-export function PreviewView({ gameId, nav }: { gameId?: number; nav: Nav }) {
+type Report = NonNullable<ReturnType<typeof SC.scoutRival>>;
+/** Informe del ayudante sobre el rival, con un botón para aplicar cada consejo a tus tácticas. */
+export function RivalReport({ gameId, nav, onApplied }: { gameId: number; nav: Nav; onApplied?: (t: Tactics) => void }) {
+  const { data } = useData<Report | null>('scoutRival', { gameId }, [gameId]);
+  const [done, setDone] = useState<Set<number>>(new Set());
+  if (!data) return null;
+  const apply = async (i: number, advice: SC.Advice) => {
+    const t = await call<Tactics>('applyAdvice', { advice });
+    setDone(new Set([...done, i]));
+    onApplied?.(t);
+  };
+  return (
+    <section className="report">
+      <h3>📋 Informe del ayudante: {data.oppName}</h3>
+      <div className="kv small">
+        <span>Ataque</span><b>{data.offense}</b>
+        <span>Defensa</span><b>{data.defense}</b>
+        <span>Ritmo</span><b>{data.pace === 'rapido' ? 'Rápido' : data.pace === 'lento' ? 'Lento' : 'Normal'}</b>
+        <span>Triples</span><b>{data.three === null ? '—' : `${Math.round(data.three * 100)} % de sus tiros`}{data.leagueThree !== null && <span className="muted"> (liga {Math.round(data.leagueThree * 100)} %)</span>}</b>
+      </div>
+      <p className="tap" onClick={() => nav.player(data.danger.id)}>
+        ⚠️ Su peligro: <b>{data.danger.name}</b> <span className="muted">{data.danger.pos} · {data.danger.archetype}{data.danger.ppg !== null ? ` · ${f1(data.danger.ppg)} puntos por partido` : ''}</span> ›
+      </p>
+      {data.advice.length === 0 && <p className="muted small">Nada que cambiar: tu plan ya encaja con este rival.</p>}
+      <ul className="plain advice">
+        {data.advice.map((a, i) => (
+          <li key={i}>
+            <span>{a.text}</span>
+            <button className="sec" disabled={done.has(i)} onClick={() => void apply(i, a.advice)}>{done.has(i) ? '✓ Aplicado' : 'Aplicar'}</button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+export function PreviewView({ gameId, nav, onApplied }: { gameId?: number; nav: Nav; onApplied?: (t: Tactics) => void }) {
   const { data, error } = useData<PreviewData | null>('preview', { gameId }, [gameId]);
   if (data === null) return error ? <Loading error={error} /> : <p className="muted">No hay partido próximo.</p>;
   if (!data) return <Loading error={error} />;
@@ -86,6 +126,7 @@ export function PreviewView({ gameId, nav }: { gameId?: number; nav: Nav }) {
           <p className="small">Esta temporada: {data.h2h.map((h) => `${h.home_id === home.club.id ? home.club.short : away.club.short} ${h.home_pts}-${h.away_pts}`).join(' · ')}</p>
         )}
       </section>
+      {data.userSide !== null && <RivalReport gameId={data.game.id} nav={nav} onApplied={onApplied} />}
       <section>
         <h3>Cara a cara</h3>
         <div className="tbl">

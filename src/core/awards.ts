@@ -135,7 +135,7 @@ export function records(db: Db) {
   const career = (expr: string) => db.rows<{ v: number; player_id: number; name: string; gp: number; seasons: number; retired: number }>(
     `SELECT ${expr} AS v, s.player_id, p.name, SUM(s.gp) AS gp, COUNT(DISTINCT s.season) AS seasons, p.retired
      FROM player_season_stats s JOIN player p ON p.id = s.player_id
-     WHERE s.source = 'sim' GROUP BY s.player_id ORDER BY v DESC LIMIT 10`,
+     WHERE s.source = 'sim' AND s.competition_id <= 6 GROUP BY s.player_id ORDER BY v DESC LIMIT 10`,
   );
   return {
     game: {
@@ -212,9 +212,9 @@ export function youthReport(db: Db, maxAge = 21) {
   };
 }
 
-export const SCOUT_COST = 25_000;
+export const SCOUT_COST = 50_000;
 /** Compensación por formación para llevarse a un juvenil de otro club. */
-export const youthFee = (potEst: number) => Math.round((40_000 + Math.max(0, potEst - 55) * 12_000) / 5_000) * 5_000;
+export const youthFee = (potEst: number) => Math.round((90_000 + Math.max(0, potEst - 55) * 30_000) / 5_000) * 5_000;
 
 /** Ojear a un jugador: los ojeadores lo siguen de cerca y su potencial estimado se afina (error ±2). */
 export function scoutPlayer(db: Db, playerId: number, clubId: number): MarketResult {

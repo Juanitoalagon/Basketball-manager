@@ -14,10 +14,11 @@ import { CLUB_COLORS, COMP_INFO, CUPO_RULES, FOREIGN_CLUBS, type Cupo, cupoOf, m
 import { Rng, mixSeed } from './rng';
 import { type Db, bumpRevision, transaction } from './schema';
 import { COMP, getUniverse, insertPlayer, refreshAiTactics, freeNumber, roundRobin, scheduleKnockout, standings, type StandingRow } from './season';
-import { addNews, askSalary, payroll, type MarketResult } from './market';
+import { MIN_SALARY, ROOKIE_SALARY, addNews, askSalary, payroll, type MarketResult } from './market';
 import { aiMarketDay } from './transfers';
 import { assistantReport, updateChemistry } from './club';
 import { nextKoDay, seasonCalendar } from './calendar';
+import { NCAA, setupLeagues } from './leagues';
 
 export const EURO = [4, 5, 6] as const;
 const EUROLEAGUE_LICENSES = ['RMA', 'FCB', 'BAS', 'VBC'];
@@ -32,11 +33,16 @@ export function cupoCounts(db: Db, clubId: number): Record<Cupo, number> {
 export function isSpanishClub(db: Db, clubId: number): boolean {
   return db.rows<{ country: string }>('SELECT country FROM club WHERE id = ?', [clubId])[0]?.country === 'ES';
 }
-/** ¿Puede entrar este jugador sin romper los cupos? */
+/**
+ * ¿Puede entrar este jugador sin romper los cupos? Desde la v0.9 se pueden fichar más de 2 extracomunitarios:
+ * el límite es de convocatoria (2 por partido en ACB, FEB y Copa; sin límite en Europa). Para no llenar la
+ * plantilla de jugadores que no pueden jugar en la liga, la IA no pasa de 3.
+ */
 export function cupoAllowsIn(db: Db, clubId: number, nationality: string): string | null {
   if (!isSpanishClub(db, clubId)) return null;
   const c = cupoCounts(db, clubId);
-  if (cupoOf(nationality) === 'EXT' && c.EXT >= CUPO_RULES.maxExt) return `Ya tienes ${CUPO_RULES.maxExt} extracomunitarios, el máximo permitido.`;
+  const user = db.rows<{ u: number | null }>('SELECT user_club_id AS u FROM universe')[0]?.u ?? null;
+  if (cupoOf(nationality) === 'EXT' && clubId !== user && c.EXT >= CUPO_RULES.maxExt + 1) return 'Ya tiene suficientes extracomunitarios.';
   return null;
 }
 /** ¿Puede salir este jugador sin quedarse por debajo del mínimo de nacionales? */
@@ -111,6 +117,8 @@ export function setupWorld(db: Db): void {
       for (const p of roster) insertPlayer(db, p, id, freeNumber(rng, nums), u.game_season);
     }
   }
+  // Ligas extranjeras, NBA y NCAA (simulación rápida).
+  setupLeagues(db);
   // Cantera inicial de los clubes españoles.
   if (!db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE youth > 0')[0]!.n) {
     const rng = new Rng(mixSeed(u.seed, 991));
@@ -254,7 +262,7 @@ export function aiSignFreeAgent(db: Db, clubId: number, season: number, until: n
   const room = c.budget - payroll(db, clubId);
   const needs = positionNeeds(db, clubId);
   const ok = (f: ReturnType<typeof freeAgentsByOvr>[number]) =>
-    askSalary({ ovr: f.ovr, age: season - f.birth_year, potential_est: f.potential_est, morale: f.morale }) <= Math.max(room, 60_000) && !cupoAllowsIn(db, clubId, f.nationality);
+    askSalary({ ovr: f.ovr, age: season - f.birth_year, potential_est: f.potential_est, morale: f.morale }) <= Math.max(room, MIN_SALARY) && !cupoAllowsIn(db, clubId, f.nationality);
   const fas = freeAgentsByOvr(db, season);
   // Primero, alguien del puesto que falta.
   const fa = (needs.length ? fas.find((f) => ok(f) && needs.includes(f.pos1)) : undefined) ?? fas.find(ok);
@@ -262,7 +270,7 @@ export function aiSignFreeAgent(db: Db, clubId: number, season: number, until: n
   const ask = askSalary({ ovr: fa.ovr, age: season - fa.birth_year, potential_est: fa.potential_est, morale: fa.morale });
   const nums = new Set(db.rows<{ number: number }>('SELECT number FROM player WHERE club_id = ? AND number IS NOT NULL', [clubId]).map((x) => x.number));
   db.exec('UPDATE player SET club_id = ?, number = ? WHERE id = ?', [clubId, freeNumber(rng, nums), fa.id]);
-  db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [fa.id, clubId, Math.min(ask, Math.max(room, 60_000)), until]);
+  db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [fa.id, clubId, Math.min(ask, Math.max(room, MIN_SALARY)), until]);
   db.exec('INSERT INTO transfer (season, day, player_id, from_club, to_club, fee, salary, until, kind) VALUES (?, (SELECT game_day FROM universe), ?, NULL, ?, 0, ?, ?, ?)', [season, fa.id, clubId, ask, until, 'libre']);
   return `${c.name} ficha a ${fa.name} (agente libre).`;
 }
@@ -270,7 +278,7 @@ export function aiSignFreeAgent(db: Db, clubId: number, season: number, until: n
 export function aiInSeason(db: Db, season: number, seed: number) {
   const u = getUniverse(db)!;
   const rng = new Rng(seed);
-  for (const c of db.rows<{ id: number }>('SELECT id FROM club WHERE id IS NOT ?', [u.user_club_id])) {
+  for (const c of db.rows<{ id: number }>(`SELECT id FROM club WHERE id IS NOT ? AND competition_id IS NOT ${NCAA}`, [u.user_club_id])) {
     const healthy = db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0 AND injury_games = 0', [c.id])[0]!.n;
     const total = db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [c.id])[0]!.n;
     if ((healthy < 10 || positionNeeds(db, c.id).length > 0) && total < 16) {
@@ -289,7 +297,7 @@ export function positionNeeds(db: Db, clubId: number): Pos[] {
 
 /** En pretemporada: cada club de la IA cubre los puestos que le faltan (hasta 16 jugadores). */
 export function aiFillNeeds(db: Db, season: number, userClub: number | null, rng: Rng, events: string[]) {
-  for (const c of db.rows<{ id: number }>('SELECT id FROM club WHERE id IS NOT ?', [userClub])) {
+  for (const c of db.rows<{ id: number }>(`SELECT id FROM club WHERE id IS NOT ? AND competition_id IS NOT ${NCAA}`, [userClub])) {
     for (let k = 0; k < 3 && positionNeeds(db, c.id).length; k++) {
       if (db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [c.id])[0]!.n >= 16) break;
       const msg = aiSignFreeAgent(db, c.id, season, season + 1, rng);
@@ -329,7 +337,7 @@ export function promoteYouth(db: Db, playerId: number, clubId: number): MarketRe
   transaction(db, () => {
     const nums = new Set(db.rows<{ number: number }>('SELECT number FROM player WHERE club_id = ? AND number IS NOT NULL', [clubId]).map((x) => x.number));
     db.exec('UPDATE player SET youth = 0, club_id = ?, number = ?, morale = 80 WHERE id = ?', [clubId, freeNumber(new Rng(playerId), nums), playerId]);
-    db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [playerId, clubId, 30_000, u.game_season + 3]);
+    db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [playerId, clubId, ROOKIE_SALARY, u.game_season + 3]);
     addNews(db, 'cantera', `${p.name} sube de la cantera al primer equipo.`, clubId, playerId);
     bumpRevision(db);
   });
@@ -357,7 +365,7 @@ export function youthOffseason(db: Db, season: number, userClub: number | null, 
         events.push(`${y.name} cumple 19 años sin subir al primer equipo y deja tu cantera.`);
       } else if (y.potential_est >= 60 && db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [c.id])[0]!.n < 15) {
         db.exec('UPDATE player SET youth = 0, club_id = ? WHERE id = ?', [c.id, y.id]);
-        db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [y.id, c.id, 30_000, season + 2]);
+        db.exec('INSERT OR REPLACE INTO contract (player_id, club_id, salary, until) VALUES (?,?,?,?)', [y.id, c.id, ROOKIE_SALARY, season + 2]);
       } else db.exec('UPDATE player SET youth = 0 WHERE id = ?', [y.id]);
     }
   }
@@ -376,7 +384,7 @@ export function upgradeClub(db: Db, clubId: number, what: 'facilities' | 'scouti
   });
   return { ok: true, message: what === 'facilities' ? `Instalaciones mejoradas al nivel ${level + 1}.` : `Ojeadores mejorados al nivel ${level + 1}.` };
 }
-export const upgradeCost = (what: 'facilities' | 'scouting', level: number) => (what === 'facilities' ? 500_000 : 150_000) * level;
+export const upgradeCost = (what: 'facilities' | 'scouting', level: number) => (what === 'facilities' ? 1_200_000 : 350_000) * level;
 
 /* ───────────── Entrenamiento ───────────── */
 

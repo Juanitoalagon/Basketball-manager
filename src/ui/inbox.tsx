@@ -2,13 +2,13 @@
 import { useState } from 'react';
 import type * as Q from '../core/queries';
 import { call } from '../db/client';
-import { Loading, type Nav, useChangeTick, useData, useSticky } from './kit';
+import { Loading, type Nav, notifyChange, useChangeTick, useData, useSticky } from './kit';
 import { fmtDate } from './screens';
 
 type Inbox = ReturnType<typeof Q.inbox>;
 const ICON: Record<string, string> = {
   oferta: '💰', lesion: '✚', alta: '✅', moral: '😟', directiva: '🏛', ayudante: '📋', contrato: '📝', cesion: '↔', premio: '🏅',
-  fichaje: '✍', venta: '💶', cantera: '🌱', cambio: '🔁',
+  fichaje: '✍', venta: '💶', cantera: '🌱', cambio: '🔁', peticion: '😠',
 };
 
 export function InboxPanel({ clubId, nav }: { clubId: number; nav: Nav }) {
@@ -25,7 +25,7 @@ export function InboxPanel({ clubId, nav }: { clubId: number; nav: Nav }) {
       setBusy(false);
       reload();
     }
-    if (r.action?.type === 'player' && r.action.id) nav.player(r.action.id);
+    if ((r.action?.type === 'player' || r.action?.type === 'request') && r.action.id) nav.player(r.action.id);
     else if (r.player_id) nav.player(r.player_id);
   };
   return (
@@ -66,5 +66,37 @@ export function BoardCard({ clubId }: { clubId: number }) {
       </div>
       <p className="muted small">Cumplir el objetivo sube el presupuesto de la próxima temporada (+5 %, o +12 % si lo superas); fallarlo lo recorta un 8 %. Nunca te despiden.</p>
     </section>
+  );
+}
+
+type Promise0 = { kind: string; minutes: number; strikes: number; broken: number; season: number } | null;
+/** Jugador que pide salir, transferible o con una promesa: estado y qué puede hacer el entrenador. */
+export function RequestPanel({ id, wantsOut, listed, promise, onDone }: { id: number; wantsOut: boolean; listed: boolean; promise: Promise0; onDone: () => void }) {
+  const [msg, setMsg] = useState<{ ok: boolean; message: string } | null>(null);
+  const [mins, setMins] = useState(20);
+  const act = async (action: string, extra: Record<string, unknown> = {}) => {
+    const r = await call<{ ok: boolean; message: string }>('request', { id, action, ...extra });
+    setMsg(r);
+    notifyChange();
+    onDone();
+  };
+  return (
+    <div className={`reqbox ${wantsOut ? 'bad' : ''}`}>
+      {wantsOut && <b>😠 Pide salir del club</b>}
+      {listed && <div className="small">📋 En la lista de transferibles: le llegan más ofertas.</div>}
+      {promise && <div className="small">{promise.broken ? '💔 Le rompiste una promesa: ya no se fía de ti.' : `🤝 Le prometiste unos ${promise.minutes} minutos esta temporada${promise.strikes ? ` · avisos ${promise.strikes}/5` : ''}.`}</div>}
+      {wantsOut && <p className="muted small">Mientras quiera irse rinde algo menos (−3 en todo).</p>}
+      <div className="row tight">
+        {wantsOut && <button className="sec" onClick={() => void act('hablar')}>Hablar con él</button>}
+        {wantsOut && !promise?.broken && (
+          <span className="row tight">
+            <select value={mins} onChange={(e) => setMins(Number(e.target.value))} aria-label="Minutos prometidos">{[10, 15, 20, 25, 30].map((m) => <option key={m} value={m}>{m} min</option>)}</select>
+            <button className="sec" onClick={() => void act('prometer', { minutes: mins })}>Prometer minutos</button>
+          </span>
+        )}
+        {!listed ? (wantsOut && <button className="sec" onClick={() => void act('vender')}>Ponerlo en venta</button>) : <button className="sec" onClick={() => void act('quitar')}>Quitar de transferibles</button>}
+      </div>
+      {msg && <p className={msg.ok ? 'ok' : 'error'}>{msg.message}</p>}
+    </div>
   );
 }

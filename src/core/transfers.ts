@@ -10,12 +10,16 @@ import { type Db, bumpRevision, transaction } from './schema';
 import { getUniverse, freeNumber } from './season';
 import { cupoAllowsIn, cupoAllowsOut } from './world';
 import { cupoOf, CUPO_RULES } from './names';
+import { NBA, NCAA_MSG, isNcaaClub } from './leagues';
+import { type PromiseTerms, effectiveDiscount } from './promises';
 import { ROSTER_MAX, ROSTER_MIN, addNews, askSalary, econOf, marketValue, payroll, type MarketResult } from './market';
 
 const round = (x: number, step: number) => Math.max(step, Math.round(x / step) * step);
 const eur = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toLocaleString('es-ES', { maximumFractionDigits: 2 })} M€` : `${Math.round(x / 1000).toLocaleString('es-ES')} mil €`);
 const clubName = (db: Db, id: number | null) => (id ? db.rows<{ name: string }>('SELECT name FROM club WHERE id = ?', [id])[0]?.name ?? '¿?' : 'agente libre');
 const rosterSize = (db: Db, clubId: number) => Number(db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [clubId])[0]!.n);
+
+const clubComp = (db: Db, id: number) => db.rows<{ c: number | null }>('SELECT competition_id AS c FROM club WHERE id = ?', [id])[0]?.c ?? null;
 
 /* ───────────── Ventanas ───────────── */
 
@@ -48,64 +52,90 @@ export function attractiveness(db: Db, clubId: number | null): number {
 /** Años que prefiere firmar según su edad. */
 export const preferredYears = (age: number) => (age < 24 ? 4 : age < 29 ? 3 : age < 33 ? 2 : 1);
 
-interface Mood { attempts: number; mood: number }
+interface Mood { attempts: number; mood: number; give: number }
 function moodKey(db: Db, playerId: number, party: number): Mood {
   const u = getUniverse(db)!;
-  return db.rows<Mood>('SELECT attempts, mood FROM negotiation WHERE player_id = ? AND club_id = ? AND season = ?', [playerId, party, u.game_season])[0] ?? { attempts: 0, mood: 100 };
+  return db.rows<Mood>('SELECT attempts, mood, give FROM negotiation WHERE player_id = ? AND club_id = ? AND season = ?', [playerId, party, u.game_season])[0] ?? { attempts: 0, mood: 100, give: 0 };
 }
 function setMood(db: Db, playerId: number, party: number, m: Mood) {
   const u = getUniverse(db)!;
-  db.exec('INSERT OR REPLACE INTO negotiation (player_id, club_id, season, attempts, mood) VALUES (?,?,?,?,?)', [playerId, party, u.game_season, m.attempts, m.mood]);
+  db.exec('INSERT OR REPLACE INTO negotiation (player_id, club_id, season, attempts, mood, give) VALUES (?,?,?,?,?,?)', [playerId, party, u.game_season, m.attempts, m.mood, m.give]);
+}
+/** Lo que ya ha cedido en esta negociación (fracción de su cifra inicial). */
+export function given(db: Db, playerId: number, party: number): number {
+  return moodKey(db, playerId, party).give ?? 0;
+}
+/**
+ * Regateo: si la oferta no está lejos (falta menos de un 30 %), la otra parte cede algo hacia ella:
+ * cede += 0,35·lo que falta + 2 %, hasta un máximo. Si la oferta ofende, no cede nada.
+ */
+function haggle(m: Mood, short: number, maxGive: number) {
+  m.attempts += 1;
+  m.mood = Math.max(0, m.mood - (short > 0.3 ? 40 : short > 0.12 ? 22 : 14));
+  if (short <= 0.3) m.give = Math.min(maxGive, m.give + 0.35 * short + 0.02);
 }
 /** Paciencia del jugador (party = club que negocia) o del club vendedor (party = −club que compra). */
 export function patience(db: Db, playerId: number, party: number): number {
   return moodKey(db, playerId, party).mood;
 }
-function spendPatience(db: Db, playerId: number, party: number, shortfall: number) {
-  const m = moodKey(db, playerId, party);
-  m.attempts += 1;
-  m.mood = Math.max(0, m.mood - (shortfall > 0.25 ? 45 : shortfall > 0.1 ? 30 : 20));
-  setMood(db, playerId, party, m);
-  return m.mood;
-}
 
-export interface Terms { salary: number; years: number; clause: number | null }
+export interface Terms { salary: number; years: number; clause: number | null; promise?: PromiseTerms | null }
 /**
  * Lo que necesita un jugador para firmar con un club: sueldo pedido ajustado por el atractivo del club,
  * los años ofrecidos frente a los que prefiere, su moral y la cláusula.
  *   necesario = pide · moral / (atractivo · encaje de años) · efecto de la cláusula
  */
-export function requiredSalary(db: Db, playerId: number, clubId: number, years: number, clause: number | null, renewal = false): number {
+export function requiredSalary(db: Db, playerId: number, clubId: number, years: number, clause: number | null, renewal = false, promise: PromiseTerms | null = null): number {
   const e = econOf(db, playerId);
   const pref = preferredYears(e.econ.age);
   const fit = 1 - 0.05 * Math.abs(years - pref);
   const att = renewal ? Math.max(1.02, attractiveness(db, clubId)) : attractiveness(db, clubId);
   const moodF = e.econ.morale < 40 ? 1.12 : e.econ.morale >= 75 && renewal ? 0.96 : 1;
-  const value = Math.max(e.value, 50_000);
+  const value = Math.max(e.value, 120_000);
   const clauseF = clause === null ? 1 : clause < value * 1.5 ? 0.96 : clause > value * 4 ? 1.06 : 1;
-  return round((e.ask * moodF * clauseF) / (att * fit), 5_000);
+  // Al renovar, el contrato nuevo empieza la temporada que viene: cuenta ya con un año más (los veteranos piden menos).
+  const ask = renewal ? askSalary({ ...e.econ, age: e.econ.age + 1 }) : e.ask;
+  // Un jugador de la NBA solo la deja si le pagan bastante más (×1,6).
+  const nbaF = !renewal && e.club_id !== null && clubComp(db, e.club_id) === NBA && clubComp(db, clubId) !== NBA ? 1.6 : 1;
+  // Una promesa de papel (titular, rotación, minutos) le hace pedir menos, si todavía se fía de ti.
+  const promiseF = 1 - effectiveDiscount(db, playerId, clubId, promise);
+  return round((ask * moodF * clauseF * nbaF * promiseF) / (att * fit), 5_000);
 }
 
-/** El jugador decide. Si no acepta, devuelve la cifra que aceptaría con esos años y pierde paciencia. */
+/** Cuánto puede llegar a ceder un jugador: los veteranos y los contentos, más; en una renovación, un poco más. */
+const playerMaxGive = (age: number, morale: number, renewal: boolean) => (age >= 32 ? 0.18 : morale >= 70 ? 0.12 : 0.1) + (renewal ? 0.03 : 0);
+
+/** El jugador decide. Si no acepta, cede algo si la oferta no está lejos, contraoferta y pierde paciencia. */
 export function playerDecision(db: Db, playerId: number, clubId: number, t: Terms, renewal = false): MarketResult & { counter?: number; patience?: number } {
   const e = econOf(db, playerId);
   const party = clubId;
-  if (patience(db, playerId, party) <= 0) return { ok: false, message: `${e.name} no quiere seguir negociando contigo esta temporada.`, patience: 0 };
-  const need = requiredSalary(db, playerId, clubId, t.years, t.clause, renewal);
+  const m = moodKey(db, playerId, party);
+  if (m.mood <= 0) return { ok: false, message: `${e.name} no quiere seguir negociando contigo esta temporada.`, patience: 0 };
+  const base = requiredSalary(db, playerId, clubId, t.years, t.clause, renewal, t.promise ?? null);
+  const need = round(base * (1 - m.give), 5_000);
   if (t.salary >= need) return { ok: true, message: 'Acepta.' };
   const short = (need - t.salary) / need;
-  const left = spendPatience(db, playerId, party, short);
+  const before = m.give;
+  haggle(m, short, playerMaxGive(e.econ.age, e.econ.morale, renewal));
+  setMood(db, playerId, party, m);
+  const counter = Math.max(round(base * (1 - m.give), 5_000), t.salary + 5_000);
   const pref = preferredYears(e.econ.age);
   const hint = t.years !== pref ? ` Prefiere ${pref} ${pref === 1 ? 'temporada' : 'temporadas'}.` : '';
-  const tone = short > 0.25 ? 'Se siente ofendido por la oferta.' : short > 0.1 ? 'Le parece poco.' : 'Está cerca.';
+  const moved = m.give > before + 0.001;
+  const tone = short > 0.3 ? 'Se siente ofendido por la oferta y no baja nada.' : moved ? (m.give >= playerMaxGive(e.econ.age, e.econ.morale, renewal) - 0.001 ? 'Baja otra vez, pero dice que es su última palabra.' : 'Le parece poco, pero baja su petición.') : 'Está cerca.';
   return {
     ok: false,
-    counter: need,
-    patience: left,
-    message: left <= 0
+    counter,
+    patience: m.mood,
+    message: m.mood <= 0
       ? `${e.name} rompe las negociaciones: no volverá a escucharte esta temporada.`
-      : `${tone} ${e.name} firmaría por ${eur(need)} por temporada.${hint} Paciencia: ${left} %.`,
+      : `${tone} ${e.name} firmaría por ${eur(counter)} por temporada.${hint} Paciencia: ${m.mood} %.`,
   };
+}
+
+/** Lo que pide ahora mismo (con lo que haya cedido ya en esta negociación). */
+export function currentNeed(db: Db, playerId: number, clubId: number, years: number, clause: number | null, renewal = false): number {
+  return round(requiredSalary(db, playerId, clubId, years, clause, renewal) * (1 - given(db, playerId, clubId)), 5_000);
 }
 
 /** Lo que quiere el club vendedor. Si hay cláusula y la pagas, no puede negarse. */
@@ -124,23 +154,34 @@ export function clubDecision(db: Db, playerId: number, buyer: number, fee: numbe
   const w = sellerWants(db, playerId);
   if (w.clause !== null && fee >= w.clause) return { ok: true, message: `Pagas la cláusula de rescisión (${eur(w.clause)}).`, byClause: true };
   const party = -buyer;
-  if (patience(db, playerId, party) <= 0) return { ok: false, message: `${clubName(db, e.club_id)} no quiere hablar más contigo de ${e.name} esta temporada.`, patience: 0 };
-  if (fee >= w.wanted) return { ok: true, message: 'El club acepta.' };
-  const short = (w.wanted - fee) / w.wanted;
-  const left = spendPatience(db, playerId, party, short);
+  const m = moodKey(db, playerId, party);
+  if (m.mood <= 0) return { ok: false, message: `${clubName(db, e.club_id)} no quiere hablar más contigo de ${e.name} esta temporada.`, patience: 0 };
+  const want = round(w.wanted * (1 - m.give), 5_000);
+  if (fee >= want) return { ok: true, message: 'El club acepta.' };
+  const short = (want - fee) / want;
+  const before = m.give;
+  haggle(m, short, w.key ? 0.08 : 0.15);
+  setMood(db, playerId, party, m);
+  const counter = Math.max(round(w.wanted * (1 - m.give), 5_000), fee + 5_000);
+  const moved = m.give > before + 0.001;
   return {
     ok: false,
-    counter: w.wanted,
-    patience: left,
-    message: left <= 0
+    counter,
+    patience: m.mood,
+    message: m.mood <= 0
       ? `${clubName(db, e.club_id)} da por cerradas las negociaciones por ${e.name}.`
-      : `${clubName(db, e.club_id)} rechaza ${eur(fee)}. Lo dejaría ir por ${eur(w.wanted)}${w.clause ? ` (cláusula: ${eur(w.clause)})` : ''}. Paciencia: ${left} %.`,
+      : `${clubName(db, e.club_id)} rechaza ${eur(fee)}${short > 0.3 ? ' y no rebaja nada' : moved ? ' pero rebaja su precio' : ''}. Lo dejaría ir por ${eur(counter)}${w.clause ? ` (cláusula: ${eur(w.clause)})` : ''}. Paciencia: ${m.mood} %.`,
   };
+}
+
+/** Lo que pide ahora el club vendedor (con lo que haya rebajado ya). */
+export function currentSellerWants(db: Db, playerId: number, buyer: number): number {
+  return round(sellerWants(db, playerId).wanted * (1 - given(db, playerId, -buyer)), 5_000);
 }
 
 /** Cláusula por defecto de un contrato de la IA: entre 2,4 y 4 veces su valor. */
 export function defaultClause(value: number, rng: Rng) {
-  return round(Math.max(150_000, value) * (2.4 + rng.next() * 1.6), 10_000);
+  return round(Math.max(350_000, value) * (2.4 + rng.next() * 1.6), 10_000);
 }
 
 /* ───────────── Movimiento de un jugador entre clubes ───────────── */
@@ -151,6 +192,8 @@ function movePlayer(db: Db, playerId: number, from: number, to: number, fee: num
   db.exec('UPDATE club SET cash = cash - ? WHERE id = ?', [fee, to]);
   db.exec('DELETE FROM lineup WHERE player_id = ?', [playerId]);
   db.exec('DELETE FROM player_tendency WHERE player_id = ?', [playerId]);
+  db.exec('DELETE FROM promise WHERE player_id = ?', [playerId]);
+  db.exec('UPDATE player SET wants_out = 0, unhappy = 0, listed = 0 WHERE id = ?', [playerId]);
   const nums = new Set(db.rows<{ number: number }>('SELECT number FROM player WHERE club_id = ? AND number IS NOT NULL AND id <> ?', [to, playerId]).map((x) => x.number));
   const cur = db.rows<{ number: number | null }>('SELECT number FROM player WHERE id = ?', [playerId])[0]?.number ?? null;
   db.exec('UPDATE player SET club_id = ?, number = ? WHERE id = ?', [to, cur === null || nums.has(cur) ? freeNumber(new Rng(playerId + u.game_day), nums) : cur, playerId]);
@@ -201,16 +244,19 @@ export function aiMarketDay(db: Db, seed: number): string[] {
   }
   const rng = new Rng(mixSeed(seed, u.game_season * 977 + u.game_day * 13));
   if (u.user_club_id) {
-    const mine = db.rows<{ id: number; ovr: number }>(
-      'SELECT p.id, a.ovr FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ? WHERE p.club_id = ? AND p.retired = 0 AND p.id NOT IN (SELECT player_id FROM loan) ORDER BY a.ovr DESC',
+    const mine = db.rows<{ id: number; ovr: number; listed: number }>(
+      'SELECT p.id, a.ovr, p.listed FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ? WHERE p.club_id = ? AND p.retired = 0 AND p.id NOT IN (SELECT player_id FROM loan) ORDER BY a.ovr DESC',
       [u.game_season, u.user_club_id],
     );
     const pending = db.rows<{ n: number }>("SELECT COUNT(*) AS n FROM market_offer WHERE status = 'pendiente' AND to_club = ?", [u.user_club_id])[0]!.n;
     // En verano hay más movimiento; durante la temporada, alguna oferta suelta.
-    if (pending < 4 && rng.chance(w.name === 'verano' ? 0.45 : 0.16)) {
+    const anyListed = mine.some((p) => p.listed);
+    if (pending < 4 && rng.chance((w.name === 'verano' ? 0.45 : 0.16) * (anyListed ? 1.8 : 1))) {
       const clubs = rng.shuffle(db.rows<{ id: number; name: string; cash: number }>('SELECT id, name, cash FROM club WHERE id <> ? ORDER BY id', [u.user_club_id]));
       for (const c of clubs.slice(0, 12)) {
-        const target = mine.find((p, i) => i < 9 && p.ovr >= nthBest(db, c.id, 5, u.game_season) && !db.rows("SELECT 1 FROM market_offer WHERE status = 'pendiente' AND player_id = ?", [p.id]).length);
+        const free = (p: { id: number }) => !db.rows("SELECT 1 FROM market_offer WHERE status = 'pendiente' AND player_id = ?", [p.id]).length;
+        // Los transferibles interesan a más clubes (basta con que entren en su rotación).
+        const target = mine.find((p) => p.listed && p.ovr >= nthBest(db, c.id, 9, u.game_season) && free(p)) ?? mine.find((p, i) => i < 9 && p.ovr >= nthBest(db, c.id, 5, u.game_season) && free(p));
         if (!target) continue;
         const e = econOf(db, target.id);
         if (!canBuy(db, c.id, target.id, e.value * 0.8, e.salary ?? e.ask)) continue;
@@ -224,7 +270,7 @@ export function aiMarketDay(db: Db, seed: number): string[] {
           ev.push(`${c.name} paga la cláusula de rescisión de ${e.name} (${eur(clause)}). Ya no es tu jugador.`);
           break;
         }
-        const fee = round(e.value * (0.8 + rng.next() * 0.35), 5_000);
+        const fee = round(e.value * (0.8 + rng.next() * 0.35) * (target.listed ? 0.9 : 1), 5_000);
         if (fee > c.cash) continue;
         db.exec("INSERT INTO market_offer (season, day, player_id, from_club, to_club, fee, status, expires_day, note) VALUES (?,?,?,?,?,?, 'pendiente', ?, ?)", [
           u.game_season, u.game_day, target.id, c.id, u.user_club_id, fee, u.game_day + 6, String(round(fee * (1.08 + rng.next() * 0.14), 5_000)),
@@ -295,7 +341,7 @@ function aiTransfers(db: Db, rng: Rng, max: number): string[] {
     const pos = (['PG', 'SG', 'SF', 'PF', 'C'] as const).reduce((a, p) => ((best[p] ?? 0) < (best[a] ?? 0) ? p : a), 'PG' as string);
     const cands = db.rows<{ id: number; club_id: number; ovr: number }>(
       `SELECT p.id, p.club_id, a.ovr FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
-       WHERE p.pos1 = ? AND p.club_id IS NOT NULL AND p.club_id NOT IN (?, ?) AND p.retired = 0 AND p.injury_games = 0 AND a.ovr >= ? AND p.id NOT IN (SELECT player_id FROM loan) ORDER BY a.ovr ASC LIMIT 8`,
+       WHERE p.pos1 = ? AND p.club_id IS NOT NULL AND p.club_id NOT IN (?, ?) AND p.club_id NOT IN (SELECT id FROM club WHERE competition_id IN (12, 13)) AND p.retired = 0 AND p.injury_games = 0 AND a.ovr >= ? AND p.id NOT IN (SELECT player_id FROM loan) ORDER BY a.ovr ASC LIMIT 8`,
       [u.game_season, pos, b.id, u.user_club_id ?? -1, (best[pos] ?? 0) + 3],
     );
     for (const c of cands) {
@@ -344,6 +390,7 @@ export function proposeTrade(db: Db, p: TradeProposal): MarketResult & { counter
   if (!p.give.length && p.cash <= 0) return { ok: false, message: 'Ofrece al menos un jugador o dinero.' };
   const target = econOf(db, p.get);
   if (target.club_id === null || target.club_id === me) return { ok: false, message: 'Elige un jugador de otro club.' };
+  if (isNcaaClub(db, target.club_id)) return { ok: false, message: NCAA_MSG };
   const other = target.club_id;
   for (const id of p.give) if (econOf(db, id).club_id !== me) return { ok: false, message: 'Solo puedes ofrecer jugadores tuyos.' };
   const cash = Math.max(0, Math.round(p.cash));
@@ -378,7 +425,11 @@ export function proposeTrade(db: Db, p: TradeProposal): MarketResult & { counter
   if (patience(db, p.get, party) <= 0) return { ok: false, message: `${clubName(db, other)} no quiere hablar más de ${target.name} esta temporada.` };
   const v = tradeValue(db, p);
   if (v.offered < v.wanted) {
-    const left = spendPatience(db, p.get, party, (v.wanted - v.offered) / v.wanted);
+    const m = moodKey(db, p.get, party);
+    m.attempts += 1;
+    m.mood = Math.max(0, m.mood - ((v.wanted - v.offered) / v.wanted > 0.3 ? 40 : 18));
+    setMood(db, p.get, party, m);
+    const left = m.mood;
     return {
       ok: false,
       counter: v.wanted - v.offered + cash,
