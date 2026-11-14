@@ -44,3 +44,8 @@ export function archetypes(a: Attrs, pos: Pos, heightCm: number): Archetype[] {
 export function archetype(a: Attrs, pos: Pos, heightCm: number): Archetype {
   return archetypes(a, pos, heightCm)[0]!;
 }
+
+/** Atributos que definen cada arquetipo (para entrenar «hacia» un arquetipo). */
+export function archetypeKeys(k: ArchetypeKey): AttrKey[] {
+  return [...new Set(DEF[k].keys)];
+}

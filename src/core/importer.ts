@@ -22,7 +22,7 @@ import { REAL_CLUBS } from './names';
 import { ensureEconomy } from './market';
 import { scheduleEurope, setupWorld } from './world';
 import { Rng } from './rng';
-import { FIRST_SEASON, freeNumber, getUniverse, insertPlayer, scheduleSeason, type UniverseInfo } from './season';
+import { FIRST_SEASON, freeNumber, getUniverse, insertPlayer, scheduleSeason, seasonSetup, type UniverseInfo } from './season';
 import { type Db, ENGINE_VERSION, GAME_TABLES, transaction } from './schema';
 import { sha256Hex } from './savefile';
 
@@ -325,6 +325,7 @@ export function createRealUniverse(db: Db, data: RealData, opts: { name: string;
     setupWorld(db);
     scheduleEurope(db, season, opts.seed);
     ensureEconomy(db);
+    seasonSetup(db, season, null, new Rng(opts.seed + 4711));
     db.exec("INSERT INTO settings(key, value) VALUES ('revision', '0') ON CONFLICT(key) DO UPDATE SET value = '0'");
   });
   return getUniverse(db)!;

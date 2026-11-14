@@ -1,23 +1,48 @@
 /**
- * Caras generadas para los jugadores inventados (facesjs, licencia Apache-2.0).
- *
- * La cara depende solo del id del jugador: siempre sale la misma, en cualquier móvil y tras importar
- * la partida. No se guarda nada en la base de datos. La edad cambia el pelo (canas, entradas) y la
- * nacionalidad orienta el tono de piel. La camiseta lleva los colores del club.
- * La librería se carga aparte (≈ 100 kB comprimida) solo cuando hay que pintar la primera cara.
+ * Caras generadas para los jugadores inventados. Siempre la misma cara para el mismo jugador
+ * (la semilla es su id); no se guarda nada en la partida. Tres estilos, a elegir en Datos › Ajustes:
+ *  - «avataaars» (por defecto): diseño de Pablo Stanley, libre para uso personal y comercial (DiceBear, MIT).
+ *  - «personas»: diseño de Draftbit, licencia CC BY 4.0 (DiceBear, MIT).
+ *  - «facesjs»: el estilo de las versiones anteriores (Apache-2.0).
+ * La nacionalidad orienta el tono de piel, la edad pone canas y entradas, y la camiseta lleva los colores del club.
+ * Las librerías se cargan aparte, solo cuando hay que pintar la primera cara.
  */
 import { useEffect, useRef } from 'react';
 import type { FaceConfig, Race } from 'facesjs';
 import { Rng } from '../core/rng';
 
-type Lib = typeof import('facesjs');
-let lib: Promise<Lib> | null = null;
-const loadLib = () => (lib ??= import('facesjs'));
+export type FaceStyle = 'avataaars' | 'personas' | 'facesjs';
+export const FACE_STYLES: [FaceStyle, string, string][] = [
+  ['avataaars', 'Ilustración', 'Avataaars de Pablo Stanley (libre uso)'],
+  ['personas', 'Plano moderno', 'Personas de Draftbit (CC BY 4.0)'],
+  ['facesjs', 'Clásico', 'facesjs, el de versiones anteriores (Apache-2.0)'],
+];
+let style: FaceStyle = (() => {
+  try {
+    return (localStorage.getItem('faceStyle') as FaceStyle | null) ?? 'avataaars';
+  } catch {
+    return 'avataaars';
+  }
+})();
+const listeners = new Set<() => void>();
+export function getFaceStyle() {
+  return style;
+}
+export function setFaceStyle(s: FaceStyle) {
+  style = s;
+  try {
+    localStorage.setItem('faceStyle', s);
+  } catch {
+    /* sin almacenamiento: vale para esta sesión */
+  }
+  svgCache.clear();
+  for (const l of listeners) l();
+}
 
-/** SVG ya dibujados (por jugador, tramo de edad y colores), para no recalcular al volver a una pantalla. */
 const svgCache = new Map<string, string>();
 
-/** Reparto aproximado de tonos de piel por procedencia, solo para variar las caras. */
+/* ───────────── Tono de piel por procedencia ───────────── */
+
 const RACE_MIX: Record<string, [Race, number][]> = {
   ES: [['white', 0.84], ['brown', 0.08], ['black', 0.08]],
   US: [['black', 0.68], ['white', 0.24], ['brown', 0.08]],
@@ -35,18 +60,84 @@ const RACE_MIX: Record<string, [Race, number][]> = {
   UE: [['white', 0.75], ['black', 0.2], ['brown', 0.05]],
 };
 const DEFAULT_MIX: [Race, number][] = [['white', 0.9], ['black', 0.07], ['brown', 0.03]];
-
 function pickRace(rng: Rng, nationality: string): Race {
   const mix = RACE_MIX[nationality] ?? DEFAULT_MIX;
   let r = rng.next();
   for (const [race, p] of mix) if ((r -= p) <= 0) return race;
   return mix[0]![0];
 }
+const SKIN: Record<Race, string[]> = {
+  white: ['ffdbb4', 'edb98a', 'f8d25c'.replace('f8d25c', 'f1c27d')],
+  brown: ['d08b5b', 'c68642', 'ae5d29'],
+  black: ['8d5524', '614335', '4a312c'],
+  asian: ['f1c27d', 'e0ac69'],
+};
+const HAIR_DARK = ['2c1b18', '4a312c', '724133', '3b2219'];
+const HAIR_LIGHT = ['a55728', 'b58143', 'd6b370'];
+const GREY = ['a7a7a7', 'c4c4c4', 'e8e1e1'];
+const strip = (c: string) => c.replace('#', '');
 
+/* ───────────── DiceBear ───────────── */
+
+type DB = typeof import('@dicebear/core');
+let dbLib: Promise<[DB, typeof import('@dicebear/avataaars'), typeof import('@dicebear/personas')]> | null = null;
+const loadDice = () => (dbLib ??= Promise.all([import('@dicebear/core'), import('@dicebear/avataaars'), import('@dicebear/personas')]));
+
+function diceSvg(L: Awaited<ReturnType<typeof loadDice>>, which: 'avataaars' | 'personas', id: number, nationality: string, age: number, colors: [string, string, string]): string {
+  const [core, ava, per] = L;
+  const rng = new Rng(id * 7919 + 17);
+  const race = pickRace(rng, nationality);
+  const skin = rng.pick(SKIN[race]);
+  const grey = age >= 31 && rng.chance(Math.min(0.85, (age - 30) * 0.16));
+  const hair = grey ? GREY[Math.min(2, Math.floor((age - 31) / 3))]! : race === 'white' && rng.chance(0.2) ? rng.pick(HAIR_LIGHT) : rng.pick(HAIR_DARK);
+  const bald = age >= 30 && rng.chance(Math.min(0.45, (age - 29) * 0.07));
+  const beard = age > 21 ? rng.chance(0.55) : rng.chance(0.15);
+  const shirt = strip(colors[0].toLowerCase() === '#ffffff' ? colors[1] : colors[0]);
+  if (which === 'avataaars') {
+    const shortHair = race === 'black'
+      ? ['shortFlat', 'shortCurly', 'theCaesar', 'fro', 'dreads01', 'frizzle', 'shortRound'] as const
+      : ['shortFlat', 'shortRound', 'shortWaved', 'theCaesar', 'theCaesarAndSidePart', 'sides', 'shortCurly', 'shaggy'] as const;
+    return core.createAvatar(ava, {
+      seed: String(id),
+      top: [rng.pick([...shortHair])],
+      topProbability: bald ? 0 : 100,
+      hairColor: [hair],
+      facialHair: [rng.pick(['beardLight', 'beardMedium', 'beardMajestic', 'moustacheFancy'] as const)],
+      facialHairProbability: beard ? 100 : 0,
+      facialHairColor: [grey ? hair : rng.pick(HAIR_DARK)],
+      skinColor: [skin],
+      clothing: ['shirtCrewNeck'],
+      clothesColor: [shirt],
+      eyes: [rng.pick(['default', 'default', 'happy', 'squint', 'side'] as const)],
+      eyebrows: [rng.pick(['defaultNatural', 'flatNatural', 'default', 'raisedExcitedNatural', 'upDownNatural'] as const)],
+      mouth: [rng.pick(['default', 'serious', 'smile', 'twinkle'] as const)],
+      accessoriesProbability: 0,
+      style: ['default'],
+    }).toString();
+  }
+  const hairs = race === 'black' ? ['buzzcut', 'fade', 'curlyHighTop', 'curly', 'shortCombover'] as const : ['buzzcut', 'fade', 'shortCombover', 'shortComboverChops', 'sideShave', 'curly'] as const;
+  return core.createAvatar(per, {
+    seed: String(id),
+    hair: [bald ? (rng.chance(0.5) ? 'bald' : 'balding') : rng.pick([...hairs])],
+    hairColor: [hair],
+    facialHair: [rng.pick(['beardMustache', 'goatee', 'shadow', 'soulPatch', 'pyramid'] as const)],
+    facialHairProbability: beard ? 100 : 0,
+    skinColor: [skin],
+    clothingColor: [shirt],
+    body: [rng.pick(['squared', 'rounded'] as const)],
+    eyes: ['open'],
+    mouth: [rng.pick(['smile', 'smirk', 'bigSmile', 'lips'] as const)],
+    nose: [rng.pick(['mediumRound', 'smallRound', 'wrinkles'] as const)],
+  }).toString();
+}
+
+/* ───────────── facesjs (estilo clásico) ───────────── */
+
+type Lib = typeof import('facesjs');
+let fjs: Promise<Lib> | null = null;
+const loadFjs = () => (fjs ??= import('facesjs'));
 const GREYS = ['#8d8d8d', '#a7a7a7', '#c4c4c4', '#dcdcdc'];
 const BALDISH = ['bald', 'short-bald', 'crop-fade', 'short-fade'];
-
-/** Genera la cara con el azar sustituido por uno con semilla (facesjs usa Math.random por dentro). */
 function makeFace(L: Lib, id: number, nationality: string, age: number, colors: [string, string, string]): FaceConfig {
   const rng = new Rng(id * 7919 + 17);
   const race = pickRace(rng, nationality);
@@ -58,10 +149,8 @@ function makeFace(L: Lib, id: number, nationality: string, age: number, colors: 
   } finally {
     Math.random = original;
   }
-  // La edad: canas y entradas a partir de los 31-33.
   if (age >= 31 && rng.chance(Math.min(0.85, (age - 30) * 0.16))) face.hair.color = GREYS[Math.min(3, Math.floor((age - 31) / 2.5))]!;
   if (age >= 30 && rng.chance(Math.min(0.5, (age - 29) * 0.07))) face.hair.id = BALDISH[rng.int(0, BALDISH.length - 1)]!;
-  // Los veinteañeros, menos barba.
   if (age <= 21 && rng.chance(0.6)) face.facialHair.id = 'none';
   return face;
 }
@@ -76,32 +165,47 @@ export function parseColors(c: string | null | undefined): [string, string, stri
   return ['#3b4252', '#ffffff', '#9aa5b1'];
 }
 
-export function Face({ id, nationality, age, colors, size = 48, title }: { id: number; nationality: string; age: number; colors?: string | null; size?: number; title?: string }) {
+export function Face({ id, nationality, age, colors, size = 48, title, styleOverride }: { id: number; nationality: string; age: number; colors?: string | null; size?: number; title?: string; styleOverride?: FaceStyle }) {
   const tc = parseColors(colors);
-  const key = `${id}|${age >= 31 ? Math.min(age, 40) : age <= 21 ? 'j' : 0}|${tc.join()}`;
   const ref = useRef<HTMLSpanElement>(null);
+  const ageKey = age >= 30 ? Math.min(age, 40) : age <= 21 ? 'j' : 'a';
   useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const hit = svgCache.get(key);
-    if (hit) {
-      el.innerHTML = hit;
-      return;
-    }
-    el.innerHTML = '';
     let alive = true;
-    loadLib().then((L) => {
-      if (!alive || !ref.current) return;
-      // display() dibuja en el elemento (necesita el DOM real para medir algunas piezas).
-      L.display(ref.current, makeFace(L, id, nationality, age, tc));
-      if (svgCache.size > 600) svgCache.clear();
-      svgCache.set(key, ref.current.innerHTML);
-    });
+    const draw = () => {
+      const el = ref.current;
+      if (!el) return;
+      const st = styleOverride ?? style;
+      const key = `${st}|${id}|${ageKey}|${tc.join()}`;
+      const hit = svgCache.get(key);
+      if (hit) {
+        el.innerHTML = hit;
+        return;
+      }
+      el.innerHTML = '';
+      if (st === 'facesjs') {
+        void loadFjs().then((L) => {
+          if (!alive || !ref.current) return;
+          L.display(ref.current, makeFace(L, id, nationality, age, tc));
+          svgCache.set(key, ref.current.innerHTML);
+        });
+      } else {
+        void loadDice().then((L) => {
+          if (!alive || !ref.current) return;
+          const svg = diceSvg(L, st, id, nationality, age, tc);
+          if (svgCache.size > 800) svgCache.clear();
+          svgCache.set(key, svg);
+          ref.current.innerHTML = svg;
+        });
+      }
+    };
+    draw();
+    listeners.add(draw);
     return () => {
       alive = false;
+      listeners.delete(draw);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, nationality]);
-  // El contenido lo pone la librería a partir de números; React no toca el interior del span.
-  return <span ref={ref} className="face" style={{ width: size, height: size * 1.5 }} title={title} aria-hidden={!title} />;
+  }, [id, ageKey, tc.join(), nationality, styleOverride]);
+  const square = (styleOverride ?? style) !== 'facesjs';
+  return <span ref={ref} className={`face ${square ? 'sq' : ''}`} style={{ width: size, height: square ? size * 1.1 : size * 1.5 }} title={title} aria-hidden={!title} />;
 }

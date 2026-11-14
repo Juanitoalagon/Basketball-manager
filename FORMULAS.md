@@ -193,8 +193,9 @@ Un «día» del calendario es una semana.
 ## IA durante la temporada (v0.5)
 - Cada 4 días, un club con menos de 10 jugadores sanos y menos de 16 en plantilla ficha al mejor agente libre que pueda pagar y le quepa en el cupo.
 
-## Caras (v0.5)
-- Generadas con facesjs (Apache-2.0) usando como semilla el id del jugador: siempre la misma cara y no ocupa sitio en la partida.
+## Caras (v0.5, v0.7)
+- Desde la 0.7 se elige el estilo en Datos: DiceBear Avataaars (por defecto), DiceBear Personas o facesjs. Mismo id → misma cara.
+- Generadas (estilo clásico) con facesjs (Apache-2.0) usando como semilla el id del jugador: siempre la misma cara y no ocupa sitio en la partida.
 - Tono de piel orientado por la nacionalidad; a partir de 31 años, canas progresivas y algunas entradas; los menores de 22, menos barba. La camiseta lleva los colores del club.
 - Los jugadores reales importados no llevan cara inventada: se muestra su dorsal.
 
@@ -238,3 +239,54 @@ Liga ACB y Primera FEB, fase regular, mínimo la mitad de los partidos y de los 
 ## Ojeo y canteras ajenas (v0.6)
 - Ojear cuesta 25 mil €: el potencial estimado pasa a tener un error de ±2 como mucho (o menos con buenos ojeadores) y el jugador entra en tu seguimiento.
 - En verano puedes llevarte a un juvenil de otra cantera pagando una compensación por formación = 40 mil € + 12 mil € por cada punto de potencial estimado por encima de 55 (máximo 8 juveniles en tu cantera).
+
+## Calendario con fechas (v0.7)
+- Liga: un partido por semana, los sábados, desde el primer sábado de octubre (34 jornadas).
+- Europa: miércoles de las semanas impares 1-27 (14 jornadas); cruces en las semanas 30, 32 y 33. Copa del Rey: jueves, sábado y domingo de la semana siguiente a la jornada 17. Playoffs: un partido cada 2 días.
+- Ningún club juega dos veces en la misma fecha (lo comprueba un test). Las partidas antiguas se recolocan respetando el orden.
+- Mercado abierto en verano y hasta la jornada 30 de liga.
+
+## Sistemas tácticos (v0.7)
+- 8 sistemas de ataque y 8 de defensa. Cada uno cambia a qué zonas se tira, el acierto, pérdidas, asistencias, rebote ofensivo, desgaste y duración de la posesión.
+- Algunos cruces tienen efecto propio (tabla VS). Por ejemplo, el Pick & Roll contra Drop da +0,06 de logit en media distancia, y el Pick & Pop contra Drop +0,08 en triples.
+- Encaje: media de las valoraciones que pide el sistema en los cinco de pista (por ejemplo, Motion = 0,5·pase + 0,25·IQ + 0,25·juego sin balón).
+- Bonificación = clamp(0,012·(encaje − centro), ±0,12) en logit. El centro de cada sistema es la media medida en las plantillas ACB, para que un equipo normal no gane ni pierda nada.
+- Ritmo: lento = posesiones ×1,14 de duración y 0,7 de transición; rápido = ×0,88 y 1,35 de transición.
+- IA: elige el sistema que mejor encaja (con algo de azar) y el ritmo según velocidad y resistencia de sus 8 primeros. Lo revisa cada 6 días.
+
+## Emparejamientos, negar y 2 contra 1 (v0.7)
+- Por defecto, tu mejor defensor exterior (o interior, si el rival es un pívot) defiende a su mayor peligro; el resto, por puesto. Los cambios manuales se guardan y se refrescan en cada fase de la posesión.
+- Negar el balón: el marcado recibe ×0,62 tiros y ×0,5 balones, tira con −0,08 y su defensor se cansa ×1,2.
+- 2x1: ×0,45 tiros y ×0,6 balones, −0,32 en su acierto y +0,25 de pérdidas si la tiene él. Sus compañeros tiran con +0,10 y el pasador doblado reparte ×1,8.
+- La IA en el descanso niega al jugador que lleve 13 puntos o más, y le hace 2x1 si lleva 20 o más.
+
+## Rachas y tiempos muertos (v0.7)
+- Racha = puntos seguidos sin respuesta. Con 7 o más, el equipo en racha tira con +0,06 y el rival pierde más balones (+0,06).
+- Tiempo muerto (FIBA 2 en la 1ª parte, 3 en la 2ª, 1 por prórroga): corta la racha rival, da +0,07 de energía a los de pista y +0,04 de concentración durante 6 posesiones.
+- Automático: el ayudante lo pide si el rival hace el parcial que elijas (6-0 a 12-0) o si tus cinco están fundidos. La IA lo pide con 9-0.
+
+## Cansancio acumulado y minutos (v0.7)
+- Tras cada partido, cansancio += minutos·0,0073 (30 min ≈ 0,22). Se recupera ×0,72 por cada día sin jugar.
+- Energía al empezar = 1 − 0,22·cansancio; desgaste en pista ×(1 + 0,25·cansancio). Riesgo de lesión ×(1 + 1,2·cansancio).
+- Minutos objetivo: si pones X minutos a un jugador, el entrenador lo mete cuando va por debajo de X·(tiempo jugado/40) y lo sienta cuando va por encima. Con 0 minutos no juega salvo emergencia.
+- Desarrollo por minutos (≤23 años): con ≥20 min por partido, +1 en 3 atributos de su puesto; con <6, −1 en 2.
+
+## Roles, moral y química (v0.7)
+- Rol esperado según su puesto en la plantilla por media: estrella (30 min), titular (25), rotación (17), suplente (9) o reserva (3). Los de 21 años o menos esperan un escalón menos.
+- Moral tras cada partido: ±2,5 por el resultado (la mitad fuera del top 8), más clamp((min. recientes − esperados)/5, −2,2, +1,2), más (química − 50)/50. Luego vuelve un 5 % hacia 68.
+- Química (15-95) = 50 + 30·(continuidad del top 8 − 0,5) + 0,35·(moral media − 65) + min(10, partidos/3).
+- En el partido, la química da ±0,05 de logit en acierto y quita pérdidas en la misma medida.
+
+## Directiva y presupuestos (v0.7)
+- Objetivo según el presupuesto dentro de la liga. ACB: título (2 primeros), playoffs (3-8), mitad alta (9-13), salvación (resto). FEB: ascenso, top 6 o mitad.
+- Al final: superado +12 % de presupuesto, cumplido +5 %, fallado −8 %. La confianza sube o baja, pero nunca te despiden.
+- Presupuesto de la IA: también aplica su resultado y una reinversión de caja, con el factor limitado entre 0,82 y 1,22.
+
+## Entrenamiento individual (v0.7)
+- Plazas = 2 + nivel de instalaciones (cantera incluida). Planes: un atributo, un grupo, un arquetipo o un nuevo puesto (este se añade como segunda posición).
+- Puntos extra por temporada = 7 (≤19 años), 6 (≤21), 4 (≤24), 2,5 (≤28) o 1, por la intensidad del entrenamiento. Se reparten entre los atributos del plan; un solo atributo recibe el 70 %.
+
+## Cesiones (v0.7)
+- Solo con el mercado abierto. Puedes ceder a jóvenes a clubes ACB o FEB, que pagan parte del sueldo. Allí juegan los minutos que les dé su rol y vuelven al acabar la temporada, o antes si los repescas.
+- Pedir cedido: su club no cede a nadie de su top 8, ni si se queda con 11 o menos jugadores. Debes pagar al menos el 50 % del sueldo.
+- Los cedidos no se pueden vender, renovar ni traspasar mientras dure la cesión.

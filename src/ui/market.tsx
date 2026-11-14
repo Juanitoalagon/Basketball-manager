@@ -5,11 +5,50 @@ import { fga, fgm, reb } from '../core/stats';
 import { call } from '../db/client';
 import { cupoOf } from '../core/names';
 import { YouthReport } from './history';
-import { type Col, CupoTag, Loading, type Nav, posSort, shortName, useSticky, Table, Tabs, f1, f2, mins, pc, pcRaw, seasonLabel, signed, useData } from './kit';
+import { ovrClass } from './screens';
+import { type Col, CupoTag, Loading, type Nav, notifyChange, posSort, shortName, useChangeTick, useSticky, Table, Tabs, f1, f2, mins, pc, pcRaw, seasonLabel, signed, useData } from './kit';
 
 export const eur = (x: number | null | undefined) =>
   x === null || x === undefined ? '—' : Math.abs(x) >= 1e6 ? `${(x / 1e6).toLocaleString('es-ES', { maximumFractionDigits: 2 })} M€` : `${Math.round(x / 1000).toLocaleString('es-ES')} mil €`;
 const untilLabel = (y: number | null) => (y === null ? '—' : seasonLabel(y));
+
+type LoanOpt = { club_id: number; name: string; comp: number; rank: number; role: string; minutes: number; share: number };
+/** Ceder a un jugador: clubes españoles que lo quieren y el papel que tendría allí. */
+function LoanOutPanel({ id, onDone, onCancel }: { id: number; onDone: (r: Result) => void; onCancel: () => void }) {
+  const { data, error } = useData<LoanOpt[]>('loanOptions', { id }, [id]);
+  const [busy, setBusy] = useState(false);
+  if (!data) return <Loading error={error} />;
+  return (
+    <div className="card">
+      <p className="small">Cesión hasta final de temporada a un club español donde juegue. Los menores de 24 que juegan 20 minutos o más mejoran algo más cada verano; los que no juegan, se estancan. Lo puedes recuperar con el mercado abierto.</p>
+      {data.length === 0 && <p className="muted">Ningún club lo quiere ahora mismo (o no le cabe en el cupo o la plantilla).</p>}
+      <ul className="plain">
+        {data.map((o) => (
+          <li key={o.club_id} className="row tight" style={{ justifyContent: 'space-between' }}>
+            <span><b>{o.name}</b> <span className="muted small">{o.comp === 1 ? 'ACB' : 'FEB'} · sería su {o.rank}º · {o.role} (~{o.minutes} min) · paga el {Math.round(o.share * 100)} %</span></span>
+            <button className="sec" disabled={busy} onClick={async () => { setBusy(true); onDone(await call<Result>('loanOut', { id, clubId: o.club_id })); setBusy(false); }}>Ceder</button>
+          </li>
+        ))}
+      </ul>
+      <button className="sec" onClick={onCancel}>Cancelar</button>
+    </div>
+  );
+}
+
+/** Dinero disponible siempre a la vista: caja para traspasos y margen salarial. */
+export function MoneyBar({ clubId }: { clubId: number }) {
+  const tick = useChangeTick();
+  const { data } = useData<{ cash: number; budget: number; payroll: number }>('money', { clubId }, [clubId, tick]);
+  if (!data) return null;
+  const room = data.budget - data.payroll;
+  return (
+    <div className="moneybar" role="status">
+      <span><small>Caja</small><b className={data.cash < 0 ? 'bad' : ''}>{eur(data.cash)}</b></span>
+      <span><small>Margen salarial</small><b className={room < 0 ? 'bad' : room < 100_000 ? 'warn' : 'good'}>{eur(room)}</b></span>
+      <span><small>Masa / presupuesto</small><b>{eur(data.payroll)} / {eur(data.budget)}</b></span>
+    </div>
+  );
+}
 
 /* ───────────────────────────── Jugadores de la liga ───────────────────────────── */
 
@@ -41,6 +80,8 @@ export function PlayersScreen({ nav, myClub }: { nav: Nav; myClub: number }) {
     { key: 'name', label: 'Jugador', left: true, value: (r) => r.name, render: (r) => <>{r.watched && <span className="warn">★ </span>}<CupoTag nationality={r.nationality} /> {shortName(r.name)}</> },
     { key: 'club', label: 'Club', left: true, value: (r) => r.club ?? 'Libre', render: (r) => (r.club_id === null ? <span className="good">Libre</span> : r.club_id === myClub ? <b>{r.club}</b> : r.club) },
     { key: 'pos', label: 'Pos.', value: (r) => posSort(r.pos1, r.pos2), render: (r) => `${r.pos1}${r.pos2 ? `/${r.pos2}` : ''}` },
+    { key: 'ovr', label: 'Media', value: (r) => r.ovr, render: (r) => <b className={`ovr ${ovrClass(r.ovr)}`}>{r.ovr}</b> },
+    { key: 'age', label: 'Edad', value: (r) => r.age },
   ];
   const groups: Record<Grp, Col<PRow>[]> = {
     basic: [
@@ -72,8 +113,6 @@ export function PlayersScreen({ nav, myClub }: { nav: Nav; myClub: number }) {
       { key: 'pm', label: '+/-', value: (r) => L(r)?.pm ?? null, render: (r) => (L(r) ? signed(L(r)!.pm) : '—') },
     ],
     market: [
-      { key: 'age', label: 'Edad', value: (r) => r.age },
-      { key: 'ovr', label: 'Media', value: (r) => r.ovr },
       { key: 'arch', label: 'Perfil', left: true, value: (r) => r.archetype },
       { key: 'pot', label: 'Pot.', value: (r) => r.potential_est },
       { key: 'value', label: 'Valor', value: (r) => (r.club_id === null ? 0 : r.value), render: (r) => (r.club_id === null ? 'libre' : eur(r.value)) },
@@ -86,6 +125,7 @@ export function PlayersScreen({ nav, myClub }: { nav: Nav; myClub: number }) {
   return (
     <div>
       <h2>Jugadores</h2>
+      <MoneyBar clubId={myClub} />
       <MarketBanner nav={nav} />
       <Tabs<typeof scope> value={scope} onChange={setScope} options={[['acb', 'Liga ACB'], ['feb', 'Primera FEB'], ['europa', 'Europa'], ['libres', 'Agentes libres'], ['seguidos', '★ Seguidos'], ['jovenes', 'Jóvenes'], ['todos', 'Todos']]} />
       {scope === 'jovenes' ? <YouthReport nav={nav} myClub={myClub} /> : <>
@@ -143,6 +183,7 @@ export function MarketBanner({ nav }: { nav: Nav }) {
 type Market = {
   club_id: number | null; salary: number | null; until: number | null; ask: number; value: number; yearsLeft: number; releaseCost: number; morale: number; injury_games: number;
   canRenew: boolean; marketOpen: boolean; phase: string; window: { open: boolean; label: string }; clause: number | null; age: number; preferredYears: number;
+  loan: { owner_id: number; club_id: number; owner: string; club: string; share: number } | null;
   patience: number; clubPatience: number; need: number; sellerWants: number | null; offers: { id: number; club: string; fee: number; expires_day: number }[];
 };
 type Result = { ok: boolean; message: string; counter?: number; patience?: number };
@@ -181,7 +222,7 @@ type SquadLite = { players: { id: number; name: string; pos1: string; ovr: numbe
 
 export function ContractCard({ id, myClub, injury, onChanged }: { id: number; myClub: number; injury: string | null; onChanged: () => void }) {
   const { data, error, reload } = useData<Market>('market', { id }, [id]);
-  const [mode, setMode] = useState<null | 'sign' | 'buy' | 'renew' | 'sell' | 'release' | 'trade'>(null);
+  const [mode, setMode] = useState<null | 'sign' | 'buy' | 'renew' | 'sell' | 'release' | 'trade' | 'loan' | 'loanin'>(null);
   const [fee, setFee] = useState(0);
   const [salary, setSalary] = useState(0);
   const [years, setYears] = useState(2);
@@ -221,6 +262,7 @@ export function ContractCard({ id, myClub, injury, onChanged }: { id: number; my
       if (r.ok) {
         setMode(null);
         onChanged();
+        notifyChange();
       }
       reload();
     } catch (e) {
@@ -255,6 +297,7 @@ export function ContractCard({ id, myClub, injury, onChanged }: { id: number; my
   return (
     <div>
       <h3>Contrato y mercado</h3>
+      {!mine && <MoneyBar clubId={myClub} />}
       <dl>
         <dt>Situación</dt>
         <dd>{free ? <span className="good">Agente libre</span> : `${eur(data.salary)} por temporada, hasta ${untilLabel(data.until)}`}</dd>
@@ -285,15 +328,33 @@ export function ContractCard({ id, myClub, injury, onChanged }: { id: number; my
           <p className="muted small">Si pides más de lo que pueden pagar, se retiran.</p>
         </div>
       )}
+      {data.loan && (
+        <div className="card">
+          <p className="small">Cedido por <b>{data.loan.owner}</b> a <b>{data.loan.club}</b> hasta final de temporada ({Math.round(data.loan.share * 100)} % del sueldo lo paga {data.loan.club}).</p>
+          {(data.loan.owner_id === myClub || data.loan.club_id === myClub) && <button className="sec" disabled={busy || !data.window.open} onClick={() => run('recallLoan', {})}>{data.loan.owner_id === myClub ? 'Recuperarlo' : 'Devolverlo'}</button>}
+        </div>
+      )}
       {res && <p className={res.ok ? 'ok' : 'error'}>{res.message}</p>}
-      {data.marketOpen && !mode && (
+      {data.marketOpen && !mode && !data.loan && (
         <div className="row">
           {free && <button onClick={() => open('sign')}>Fichar</button>}
           {!free && !mine && <button onClick={() => open('buy')} disabled={!data.window.open}>Hacer oferta</button>}
           {!free && !mine && <button className="sec" onClick={() => open('trade')} disabled={!data.window.open}>Proponer cambio</button>}
           {mine && data.canRenew && <button onClick={() => open('renew')}>Renovar</button>}
           {mine && <button className="sec" onClick={() => open('sell')} disabled={!data.window.open}>Buscar comprador</button>}
+          {mine && <button className="sec" onClick={() => open('loan')} disabled={!data.window.open}>Ceder</button>}
+          {!free && !mine && <button className="sec" onClick={() => open('loanin')} disabled={!data.window.open}>Pedir cedido</button>}
           {mine && <button className="dangerBtn" onClick={() => open('release')}>Rescindir</button>}
+        </div>
+      )}
+      {mode === 'loan' && <LoanOutPanel id={id} onDone={(r) => { setRes(r); setMode(null); if (r.ok) { onChanged(); notifyChange(); } reload(); }} onCancel={() => setMode(null)} />}
+      {mode === 'loanin' && (
+        <div className="card">
+          <p className="small">Su club solo lo cede si no está entre sus 8 mejores. Tú eliges qué parte del sueldo pagas (mínimo la mitad); se queda hasta final de temporada y lo puedes devolver con el mercado abierto.</p>
+          <div className="row">
+            {[0.5, 0.75, 1].map((sh) => <button key={sh} className="sec" disabled={busy} onClick={() => run('loanIn', { share: sh })}>Pagar el {sh * 100} % ({eur((data.salary ?? 0) * sh)})</button>)}
+            <button className="sec" onClick={() => setMode(null)}>Cancelar</button>
+          </div>
         </div>
       )}
       {mode === 'sign' && (

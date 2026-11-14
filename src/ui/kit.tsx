@@ -37,6 +37,23 @@ export function useSticky<T>(key: string, init: T): [T, (v: T) => void] {
   return [v, set];
 }
 
+/** Aviso global de «algo ha cambiado» (fichajes, ventas…) para que se refresquen el dinero y similares. */
+const changeListeners = new Set<() => void>();
+export function notifyChange() {
+  for (const l of changeListeners) l();
+}
+export function useChangeTick(): number {
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    const f = () => setN((x) => x + 1);
+    changeListeners.add(f);
+    return () => {
+      changeListeners.delete(f);
+    };
+  }, []);
+  return n;
+}
+
 /** Última respuesta de cada consulta: al volver a una pantalla se pinta al momento y luego se refresca. */
 const dataCache = new Map<string, unknown>();
 export function clearDataCache() {

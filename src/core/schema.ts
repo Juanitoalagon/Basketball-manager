@@ -5,7 +5,7 @@ import { ATTR_KEYS } from './attributes';
  * Regla: nunca se edita una migración ya publicada; se añade otra al final.
  */
 
-export const APP_VERSION = '0.6.0';
+export const APP_VERSION = '0.7.0';
 export const FORMAT_VERSION = 1;
 /** Hasta la fase 3 no hay motor real: los partidos de prueba son sintéticos. */
 export const ENGINE_VERSION = '0.1';
@@ -308,6 +308,35 @@ MIGRATIONS.push({
   `,
 });
 
+MIGRATIONS.push({
+  version: 7,
+  name: 'tiros defendidos, cansancio, química, minutos, entrenamiento individual, cesiones, directiva y bandeja',
+  sql: `
+    ALTER TABLE game_player_box ADD COLUMN dfga INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE game_player_box ADD COLUMN dfgm INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE game_team_box ADD COLUMN dfga INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE game_team_box ADD COLUMN dfgm INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE player_season_stats ADD COLUMN dfga INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE player_season_stats ADD COLUMN dfgm INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE player ADD COLUMN fatigue REAL NOT NULL DEFAULT 0; -- cansancio acumulado (0-1)
+    ALTER TABLE player ADD COLUMN mood_note TEXT;                 -- por qué está contento o no
+    ALTER TABLE club ADD COLUMN chemistry REAL NOT NULL DEFAULT 50;
+    ALTER TABLE club ADD COLUMN confidence REAL NOT NULL DEFAULT 60; -- confianza de la directiva
+    ALTER TABLE lineup ADD COLUMN minutes INTEGER;                -- minutos objetivo (NULL = automático)
+    ALTER TABLE news ADD COLUMN read INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE news ADD COLUMN action TEXT;                      -- JSON: a dónde lleva el mensaje
+    CREATE TABLE player_training (player_id INTEGER PRIMARY KEY, plan TEXT NOT NULL, since INTEGER NOT NULL);
+    CREATE TABLE loan (
+      player_id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, club_id INTEGER NOT NULL,
+      season INTEGER NOT NULL, share REAL NOT NULL, day INTEGER NOT NULL
+    );
+    CREATE TABLE objective (
+      season INTEGER NOT NULL, club_id INTEGER NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL,
+      result TEXT, delta REAL, PRIMARY KEY (season, club_id)
+    ) WITHOUT ROWID;
+  `,
+});
+
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
 
 export function schemaVersion(db: Db): number {
@@ -341,10 +370,10 @@ export const TABLES = [
   'universe', 'settings', 'schema_migrations', 'competition', 'club', 'player', 'player_attributes', 'season', 'game',
   'game_team_box', 'game_player_box', 'game_shots', 'game_pbp', 'playoff_series', 'season_result',
   'player_season_stats', 'shot_zone_stats', 'import_batch', 'lineup', 'tactics', 'real_game_line', 'real_prediction', 'contract', 'transfer', 'news', 'club_season_finance', 'comp_group',
-  'player_tendency', 'negotiation', 'market_offer', 'award', 'watch', 'scouted',
+  'player_tendency', 'negotiation', 'market_offer', 'award', 'watch', 'scouted', 'player_training', 'loan', 'objective',
 ] as const;
 /** Tablas de la partida (todas menos ajustes y migraciones): se vacían al crear un universo. */
-export const GAME_TABLES = ['player_tendency', 'negotiation', 'market_offer', 'award', 'watch', 'scouted', 'comp_group', 'lineup', 'tactics', 'real_game_line', 'real_prediction', 'contract', 'transfer', 'news', 'club_season_finance', 'shot_zone_stats', 'player_season_stats', 'season_result', 'playoff_series', 'game_pbp', 'game_shots', 'game_player_box', 'game_team_box', 'game', 'season', 'player_attributes', 'player', 'club', 'competition', 'universe', 'import_batch'];
+export const GAME_TABLES = ['player_training', 'loan', 'objective', 'player_tendency', 'negotiation', 'market_offer', 'award', 'watch', 'scouted', 'comp_group', 'lineup', 'tactics', 'real_game_line', 'real_prediction', 'contract', 'transfer', 'news', 'club_season_finance', 'shot_zone_stats', 'player_season_stats', 'season_result', 'playoff_series', 'game_pbp', 'game_shots', 'game_player_box', 'game_team_box', 'game', 'season', 'player_attributes', 'player', 'club', 'competition', 'universe', 'import_batch'];
 
 export function getSetting(db: Db, key: string): string | null {
   return db.rows<{ value: string }>('SELECT value FROM settings WHERE key = ?', [key])[0]?.value ?? null;

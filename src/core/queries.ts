@@ -6,6 +6,8 @@ import { COMP, type StandingRow, getUniverse, standings } from './season';
 import { type Db } from './schema';
 import { askSalary, marketValue } from './market';
 import { COMP_INFO } from './names';
+import { dateOfDay, leagueRoundPlayed } from './calendar';
+import { expectedRole } from './club';
 import { archetype, archetypes } from './archetype';
 import { cupoCounts, getTraining, groupStandings, scoutNoise, upgradeCost } from './world';
 import { type League, type Line, type TeamTotals, winsAdded, astPct, drtg, efg, fourFactors, ortg, pace, pir, rebPct, tovPct, ts, usg, winShares } from './stats';
@@ -130,7 +132,7 @@ export function tactics(db: Db, clubId: number): Tactics {
   const r = db.rows<{ data: string }>('SELECT data FROM tactics WHERE club_id = ?', [clubId])[0];
   if (!r) return DEFAULT_TACTICS;
   const t = JSON.parse(r.data) as Tactics;
-  return { shot: { ...DEFAULT_TACTICS.shot, ...t.shot }, defense: { ...DEFAULT_TACTICS.defense!, ...t.defense } };
+  return { ...DEFAULT_TACTICS, ...t, shot: { ...DEFAULT_TACTICS.shot, ...t.shot }, defense: { ...DEFAULT_TACTICS.defense!, ...t.defense }, autoTimeout: { ...DEFAULT_TACTICS.autoTimeout!, ...t.autoTimeout } };
 }
 
 /** Plantilla con la media de cada jugador en cada hueco, para elegir quinteto y roles. */
@@ -139,7 +141,7 @@ export function lineup(db: Db, clubId: number) {
   const comp = compOfClub(db, clubId);
   const lines = new Map(playerLines(db, u.game_season, comp, 'regular', clubId).map((l) => [l.id, l]));
   const rows = db.rows<Record<string, unknown>>(
-    `SELECT p.id, p.name, p.number, p.pos1, p.pos2, p.height_cm, p.birth_year, p.nationality, p.origin, p.injury_games, (SELECT colors FROM club WHERE id = p.club_id) AS colors, a.*, l.slot, l.role, l.shoot
+    `SELECT p.id, p.name, p.number, p.pos1, p.pos2, p.height_cm, p.birth_year, p.nationality, p.origin, p.injury_games, p.morale, p.mood_note, p.fatigue, (SELECT colors FROM club WHERE id = p.club_id) AS colors, a.*, l.slot, l.role, l.shoot, l.minutes
      FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
      LEFT JOIN lineup l ON l.player_id = p.id AND l.club_id = p.club_id
      WHERE p.club_id = ? AND p.retired = 0 ORDER BY a.ovr DESC`,
@@ -160,8 +162,10 @@ export function lineup(db: Db, clubId: number) {
       tend: shotTendencies(attrs, Number(r.height_cm)),
       min: l && l.gp ? l.sec / 60 / l.gp : null,
       gp: l?.gp ?? 0,
+      target: r.minutes === null || r.minutes === undefined ? null : Number(r.minutes),
+      morale: Number(r.morale), mood: (r.mood_note as string | null) ?? null, fatigue: Number(r.fatigue ?? 0),
     };
-  });
+  }).map((p, rank, all) => ({ ...p, expected: expectedRole(all.filter((x) => x.ovr > p.ovr).length, p.age) }));
 }
 
 /** Todos los jugadores en activo (con club o libres), con su temporada y su situación de mercado. */
@@ -237,7 +241,12 @@ export function home(db: Db) {
      LEFT JOIN club c1 ON c1.id = r.champion_id LEFT JOIN club c2 ON c2.id = r.regular_first_id WHERE r.season = ?`,
     [u.game_season],
   );
-  return { universe: u, club, position: pos, table, next, last, nextDay, result };
+  return {
+    universe: u, club, position: pos, table, next, last, nextDay, result,
+    round: leagueRoundPlayed(db, u.game_season),
+    nextDate: next ? dateOfDay(u.game_season, next.day) : null,
+    today: u.game_day ? dateOfDay(u.game_season, u.game_day) : null,
+  };
 }
 
 export interface GameListRow {
@@ -249,19 +258,19 @@ const GAME_LIST_SQL = `SELECT g.id, g.season, g.day, g.stage, g.competition_id, 
   h.short AS home_short, a.short AS away_short, g.home_pts, g.away_pts, g.ot, g.status, g.series_id, g.round
   FROM game g JOIN club h ON h.id = g.home_id JOIN club a ON a.id = g.away_id`;
 
-export function clubSchedule(db: Db, clubId: number, season: number): GameListRow[] {
-  return db.rows<GameListRow>(GAME_LIST_SQL + ' WHERE g.season = ? AND (g.home_id = ? OR g.away_id = ?) ORDER BY g.day', [season, clubId, clubId]);
+export function clubSchedule(db: Db, clubId: number, season: number): (GameListRow & { date: string | null })[] {
+  return db.rows<GameListRow>(GAME_LIST_SQL + ' WHERE g.season = ? AND (g.home_id = ? OR g.away_id = ?) ORDER BY g.day', [season, clubId, clubId]).map((g) => ({ ...g, date: dateOfDay(season, g.day) }));
 }
 
 export function dayGames(db: Db, season: number, comp: number, day: number): GameListRow[] {
   return db.rows<GameListRow>(GAME_LIST_SQL + ' WHERE g.season = ? AND g.competition_id = ? AND g.day = ? ORDER BY g.id', [season, comp, day]);
 }
 
-export function compDays(db: Db, season: number, comp: number): { day: number; stage: string; played: number; total: number }[] {
-  return db.rows(
-    "SELECT day, MIN(stage) AS stage, SUM(status = 'jugado') AS played, COUNT(*) AS total FROM game WHERE season = ? AND competition_id = ? GROUP BY day ORDER BY day",
+export function compDays(db: Db, season: number, comp: number): { day: number; stage: string; played: number; total: number; round: number | null; date: string | null }[] {
+  return db.rows<{ day: number; stage: string; played: number; total: number; round: number | null }>(
+    "SELECT day, MIN(stage) AS stage, SUM(status = 'jugado') AS played, COUNT(*) AS total, MIN(round) AS round FROM game WHERE season = ? AND competition_id = ? GROUP BY day ORDER BY day",
     [season, comp],
-  );
+  ).map((d) => ({ ...d, round: d.stage === 'regular' || d.stage === 'grupos' ? d.round : null, date: dateOfDay(season, d.day) }));
 }
 
 export function squad(db: Db, clubId: number, season: number) {
@@ -387,8 +396,9 @@ export function decodeShots(db: Db, gameId: number): Shot[] {
 }
 
 export function gameDetail(db: Db, id: number) {
-  const g = db.rows<GameListRow & { comp: string }>(GAME_LIST_SQL.replace('FROM game g', ', k.short AS comp FROM game g JOIN competition k ON k.id = g.competition_id') + ' WHERE g.id = ?', [id])[0];
+  const g = db.rows<GameListRow & { comp: string }>(GAME_LIST_SQL.replace('FROM game g', ', k.short AS comp FROM game g JOIN competition k ON k.id = g.competition_id') + ' WHERE g.id = ?', [id])[0] as (GameListRow & { comp: string; date?: string | null }) | undefined;
   if (!g) throw new Error('Partido no encontrado.');
+  g.date = dateOfDay(g.season, g.day);
   const teams = db.rows<Record<string, number>>('SELECT * FROM game_team_box WHERE game_id = ?', [id]);
   const players = db.rows<Record<string, unknown>>(
     'SELECT b.*, p.name, p.number, p.pos1 FROM game_player_box b JOIN player p ON p.id = b.player_id WHERE b.game_id = ? ORDER BY b.gs DESC, b.sec DESC',
@@ -573,6 +583,99 @@ export function preview(db: Db, gameId?: number) {
     [u.game_season, g.home_id, g.away_id, g.away_id, g.home_id],
   );
   return { game: g, compName: COMP_INFO[g.competition_id]?.name ?? '', userSide: g.home_id === u.user_club_id ? 0 : g.away_id === u.user_club_id ? 1 : null, home: team(g.home_id), away: team(g.away_id), h2h };
+}
+
+/** Análisis ofensivo y defensivo de un jugador en una temporada (todas las competiciones). */
+export function playerAnalysis(db: Db, id: number, season: number) {
+  const sums = db.rows<Record<string, number>>(`SELECT SUM(gp) AS gp, ${SUMS} FROM player_season_stats WHERE player_id = ? AND season = ? AND source = 'sim'`, [id, season])[0] ?? {};
+  const line = toLine(sums);
+  const lg = db.rows<Record<string, number>>(`SELECT SUM(gp) AS gp, ${SUMS} FROM player_season_stats WHERE season = ? AND source = 'sim' AND competition_id IN (1, 2)`, [season])[0] ?? {};
+  const L = toLine(lg);
+  const areaOf = (z: number) => (z === 0 ? 'aro' : z <= 3 ? 'pintura' : z <= 8 ? 'media' : 'triple');
+  const area: Record<string, { fga: number; fgm: number; lga: number; lgm: number }> = { aro: { fga: 0, fgm: 0, lga: 0, lgm: 0 }, pintura: { fga: 0, fgm: 0, lga: 0, lgm: 0 }, media: { fga: 0, fgm: 0, lga: 0, lgm: 0 }, triple: { fga: 0, fgm: 0, lga: 0, lgm: 0 } };
+  for (const z of db.rows<{ zone: number; fga: number; fgm: number }>('SELECT zone, SUM(fga) AS fga, SUM(fgm) AS fgm FROM shot_zone_stats WHERE player_id = ? AND season = ? GROUP BY zone', [id, season])) {
+    area[areaOf(z.zone)]!.fga += z.fga;
+    area[areaOf(z.zone)]!.fgm += z.fgm;
+  }
+  for (const z of db.rows<{ zone: number; fga: number; fgm: number }>('SELECT zone, SUM(fga) AS fga, SUM(fgm) AS fgm FROM shot_zone_stats WHERE season = ? GROUP BY zone', [season])) {
+    area[areaOf(z.zone)]!.lga += z.fga;
+    area[areaOf(z.zone)]!.lgm += z.fgm;
+  }
+  // Canastas asistidas: se leen los tiros de sus partidos de la temporada.
+  let made = 0;
+  let assisted = 0;
+  let putbacks = 0;
+  for (const g of db.rows<{ game_id: number }>('SELECT b.game_id FROM game_player_box b JOIN game g ON g.id = b.game_id WHERE b.player_id = ? AND g.season = ?', [id, season])) {
+    for (const sh of decodeShots(db, g.game_id)) {
+      if (sh.player !== id || !sh.made) continue;
+      made++;
+      if (sh.assisted) assisted++;
+    }
+  }
+  void putbacks;
+  const fga = line.fga2 + line.fga3;
+  const min = line.sec / 60;
+  const per36 = (x: number) => (min > 0 ? (x * 36) / min : null);
+  return {
+    gp: line.gp,
+    min,
+    offense: {
+      area,
+      assistedShare: made ? assisted / made : null,
+      ftRate: fga ? line.fta / fga : null,
+      ptsPerShot: fga ? (line.pts - line.ftm) / fga : null,
+      lgPtsPerShot: L.fga2 + L.fga3 ? (L.pts - L.ftm) / (L.fga2 + L.fga3) : null,
+      tovPer36: per36(line.tov),
+      astPer36: per36(line.ast),
+      ptsPer36: per36(line.pts),
+      astTov: line.tov ? line.ast / line.tov : null,
+    },
+    defense: {
+      dfga: line.dfga,
+      dfgm: line.dfgm,
+      oppPct: line.dfga ? line.dfgm / line.dfga : null,
+      lgOppPct: L.dfga ? L.dfgm / L.dfga : null,
+      stlPer36: per36(line.stl),
+      blkPer36: per36(line.blk),
+      drbPer36: per36(line.drb),
+      pfPer36: per36(line.pf),
+      lgStl36: L.sec ? (L.stl * 36 * 60) / L.sec : null,
+      lgBlk36: L.sec ? (L.blk * 36 * 60) / L.sec : null,
+      lgDrb36: L.sec ? (L.drb * 36 * 60) / L.sec : null,
+    },
+  };
+}
+
+/** Evolución: media y grupos de atributos por temporada, y estadísticas básicas (sin las avanzadas, para ir rápido). */
+export function playerEvolution(db: Db, id: number) {
+  const p = db.rows<{ pos1: Pos; pos2: Pos | null; height_cm: number }>('SELECT pos1, pos2, height_cm FROM player WHERE id = ?', [id])[0]!;
+  const attrs = db.rows<Record<string, number>>('SELECT * FROM player_attributes WHERE player_id = ? ORDER BY season', [id]).map((r) => {
+    const a = Object.fromEntries(ATTR_KEYS.map((k) => [k, r[k]!])) as Attrs;
+    const g = (keys: string[]) => keys.reduce((x, k) => x + a[k as keyof Attrs], 0) / keys.length;
+    return {
+      season: r.season!, ovr: r.ovr!,
+      off: g(['drive', 'fin', 'sht2', 'sht3', 'ft', 'hdl', 'vis', 'pas', 'cre', 'post', 'offb', 'oreb']),
+      def: g(['perd', 'intd', 'hlpd', 'ant', 'stl', 'blk', 'dreb', 'pnr', 'intim']),
+      fis: g(['str', 'spd', 'agi', 'jmp', 'sta']),
+    };
+  });
+  void p;
+  const stats = db.rows<Record<string, number | string>>(
+    `SELECT s.season, GROUP_CONCAT(DISTINCT c.short) AS clubs, SUM(s.gp) AS gp, ${BOX_FIELDS.map((f) => `SUM(s.${f}) AS ${f}`).join(', ')}
+     FROM player_season_stats s JOIN club c ON c.id = s.club_id WHERE s.player_id = ? AND s.source = 'sim' GROUP BY s.season ORDER BY s.season DESC`,
+    [id],
+  ).map((r) => ({ season: Number(r.season), clubs: String(r.clubs), line: toLine(r as Record<string, number>) }));
+  return { attrs, stats };
+}
+
+/** Bandeja de entrada del club: mensajes con su enlace y cuántos quedan sin leer. */
+export function inbox(db: Db, clubId: number, limit = 80) {
+  const rows = db.rows<{ id: number; season: number; day: number; kind: string; text: string; read: number; action: string | null; player_id: number | null }>(
+    'SELECT id, season, day, kind, text, read, action, player_id FROM news WHERE club_id = ? ORDER BY id DESC LIMIT ?',
+    [clubId, limit],
+  ).map((r) => ({ ...r, action: r.action ? (JSON.parse(r.action) as { type: string; id?: number }) : null, date: dateOfDay(r.season, r.day) }));
+  const unread = db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM news WHERE club_id = ? AND read = 0', [clubId])[0]!.n;
+  return { rows, unread };
 }
 
 export { SUMS };

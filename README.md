@@ -2,7 +2,9 @@
 
 Simulador y gestión de baloncesto para móvil. Todo se guarda en el dispositivo; no hay servidor.
 
-**Estado: versión 0.6.0.** Novedades de la 0.6: tendencias por jugador (1-99) ajustables y arquetipos; tácticas de equipo separadas (plan de tiro y defensa); previa de cada partido; defensa y marcaje especial en directo; mapa de tiro por zonas al estilo NBA; mercado abierto en verano y hasta la jornada 30, negociación con contraoferta y paciencia, cláusulas de rescisión, ofertas que recibes, intercambios y traspasos entre clubes de la IA; premios de temporada, récords, historia de cada club, informe de jóvenes con ojeo y seguimiento; comparar jugadores; y muchos arreglos de manejo (se recuerda dónde estabas, nombres abreviados, mínimo dos jugadores por puesto, posición editable).
+**Estado: versión 0.7.0.** Novedades de la 0.7: calendario con fechas reales (nunca dos partidos el mismo día) y vista de calendario; sistemas tácticos de ataque y defensa con encaje de la plantilla; ritmo; emparejamientos, negar el balón y 2 contra 1; rachas y tiempos muertos automáticos que las cortan; cansancio acumulado y minutos objetivo; roles, moral y química; objetivos de la directiva que suben o bajan el presupuesto (sin despido); bandeja de entrada; entrenamiento individual; cesiones; análisis ofensivo y defensivo y evolución de cada jugador; tácticas de la IA; caras nuevas (DiceBear) y un directo nuevo con marcador fijo, jugada animada y pestañas.
+
+**Versión 0.6.0.** Novedades de la 0.6: tendencias por jugador (1-99) ajustables y arquetipos; tácticas de equipo separadas (plan de tiro y defensa); previa de cada partido; defensa y marcaje especial en directo; mapa de tiro por zonas al estilo NBA; mercado abierto en verano y hasta la jornada 30, negociación con contraoferta y paciencia, cláusulas de rescisión, ofertas que recibes, intercambios y traspasos entre clubes de la IA; premios de temporada, récords, historia de cada club, informe de jóvenes con ojeo y seguimiento; comparar jugadores; y muchos arreglos de manejo (se recuerda dónde estabas, nombres abreviados, mínimo dos jugadores por puesto, posición editable).
 
 **Versión 0.5.0.** Novedades de la 0.5: cupos (mínimo 4 nacionales, máximo 2 extracomunitarios) con etiquetas NAC/COM/EXT y filtro en Jugadores; Copa del Rey; EuroLeague, EuroCup y Basketball Champions League con 36 clubes extranjeros (nombres públicos, plantillas inventadas); entrenamiento (foco e intensidad), instalaciones y ojeadores; cantera con juveniles que puedes subir; fichajes de urgencia de la IA durante la temporada; caras generadas para los jugadores inventados; y un directo más visual (pista con los tiros, evolución del marcador, cambios tocando las caras).
 
@@ -57,6 +59,6 @@ npm run dev     # servidor local de desarrollo
 
 ## Créditos y licencias de terceros
 
-- Caras de los jugadores: [facesjs](https://github.com/zengm-games/facesjs), de ZenGM, licencia Apache-2.0.
+- Caras de los jugadores: [DiceBear](https://www.dicebear.com) (MIT) con los estilos Avataaars de Pablo Stanley (libre para uso personal y comercial) y Personas de Draftbit (CC BY 4.0); y [facesjs](https://github.com/zengm-games/facesjs), de ZenGM, licencia Apache-2.0.
 - Base de datos: SQLite (dominio público) compilado a WebAssembly.
 - Nombres de clubes: nombres públicos de los clubes reales. Sus plantillas, jugadores y estadísticas en el juego son inventados.

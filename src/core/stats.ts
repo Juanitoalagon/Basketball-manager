@@ -7,6 +7,8 @@ export interface Line {
   gp: number; gs?: number; sec: number; pts: number; fgm2: number; fga2: number; fgm3: number; fga3: number;
   ftm: number; fta: number; orb: number; drb: number; ast: number; stl: number; blk: number; tov: number;
   pf: number; fd: number; blka: number; pm: number;
+  /** Tiros defendidos (como defensor asignado) y anotados por el rival. */
+  dfga: number; dfgm: number;
 }
 
 export const fgm = (l: Line) => l.fgm2 + l.fgm3;

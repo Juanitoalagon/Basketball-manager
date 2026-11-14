@@ -56,10 +56,13 @@ describe('temporada completa', () => {
     while (!over && reports < 80) {
       const r = advanceDay(db);
       reports++;
-      if (r.day <= REGULAR_DAYS) expect(r.userGame).not.toBeNull();
       over = r.seasonOver;
     }
     expect(over).toBe(true);
+    // Nunca dos partidos el mismo día para el mismo club.
+    expect(one(`SELECT COUNT(*) FROM (SELECT day, c, COUNT(*) n FROM (SELECT day, home_id AS c FROM game WHERE season = 2026 UNION ALL SELECT day, away_id FROM game WHERE season = 2026) GROUP BY day, c HAVING n > 1)`)).toBe(0);
+    // Mi club juega las 34 jornadas de liga.
+    expect(one("SELECT COUNT(*) FROM game WHERE season = 2026 AND stage = 'regular' AND (home_id = 7 OR away_id = 7)")).toBe(34);
     const u = getUniverse(db)!;
     expect(u.phase).toBe('fin');
     expect(one("SELECT COUNT(*) FROM game WHERE status <> 'jugado'")).toBe(0);

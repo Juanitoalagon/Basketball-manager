@@ -9,12 +9,15 @@ import { APP_VERSION, ENGINE_VERSION, TABLES, bumpRevision, getSetting, migrate,
 import { assignClauses, ensureEconomy } from '../core/market';
 import * as TR from '../core/transfers';
 import * as AW from '../core/awards';
+import * as CL from '../core/club';
 import { setupWorld } from '../core/world';
+import { migrateCalendar } from '../core/calendar';
 import * as M from '../core/market';
-import { COMP, advanceDay, chooseClub, createUniverse, getUniverse, prepareLive, setLineup, startNewSeason, standings, type DayReport } from '../core/season';
+import { COMP, loadTeam, seasonSetup, advanceDay, chooseClub, createUniverse, getUniverse, prepareLive, setLineup, startNewSeason, standings, type DayReport } from '../core/season';
 import { simulateGame, type Intervention } from '../core/engine';
 import type { Level, Role, Tactics } from '../core/engine';
 import * as Q from '../core/queries';
+import { Rng } from '../core/rng';
 import * as W from '../core/world';
 import * as C from '../core/coach';
 import { POSITIONS, type Pos, overallAt } from '../core/attributes';
@@ -56,8 +59,11 @@ function openMain() {
   // Partidas de versiones anteriores: crear contratos y presupuestos que no existían.
   // Partidas de versiones anteriores: añade clubes europeos, colores, cantera y contratos que falten.
   transaction(db, () => {
+    migrateCalendar(db);
     setupWorld(db);
     ensureEconomy(db);
+    const u0 = getUniverse(db);
+    if (u0 && !db.rows('SELECT 1 FROM objective WHERE season = ? LIMIT 1', [u0.game_season]).length) seasonSetup(db, u0.game_season, u0.user_club_id, new Rng(u0.seed + 4711));
     assignClauses(db);
   });
 }
@@ -206,10 +212,15 @@ async function loadTest(seasons: number): Promise<LoadResult> {
 }
 
 /** Avanza jornadas guardando cada una por separado; se puede detener entre jornadas. */
-async function advance(mode: 'day' | 'week' | 'regular' | 'season'): Promise<AdvanceResult> {
+/**
+ * Avanzar: 'day' = el siguiente día con partidos; 'mine' = hasta jugar tu próximo partido;
+ * 'week' = cinco jornadas de liga; 'regular' = hasta los playoffs; 'season' = hasta el final.
+ */
+async function advance(mode: 'day' | 'mine' | 'week' | 'regular' | 'season'): Promise<AdvanceResult> {
   cancelRequested = false;
   const reports: DayReport[] = [];
-  const max = mode === 'day' ? 1 : mode === 'week' ? 5 : 200;
+  const max = mode === 'day' ? 1 : 400;
+  let leagueDays = 0;
   const startPhase = getUniverse(db)?.phase;
   for (let i = 0; i < max && !cancelRequested; i++) {
     const r = advanceDay(db);
@@ -222,8 +233,11 @@ async function advance(mode: 'day' | 'week' | 'regular' | 'season'): Promise<Adv
       if (me) record = `${me.w}-${me.l}`;
     }
     const last = r.userGame ? `${r.userGame.home} ${r.userGame.homePts}-${r.userGame.awayPts} ${r.userGame.away}` : undefined;
-    postMessage({ event: 'progress', progress: { done: i + 1, total: max === 200 ? 0 : max, season: r.season, day: r.day, lastMs: 0, record, last, stage: r.stage } });
+    postMessage({ event: 'progress', progress: { done: i + 1, total: max === 400 ? 0 : max, season: r.season, day: r.day, lastMs: 0, record, last, stage: r.stage } });
     if (r.seasonOver) break;
+    if (mode === 'mine' && r.userGame) break;
+    if (r.stage === 'regular') leagueDays++;
+    if (mode === 'week' && leagueDays >= 5) break;
     const u = getUniverse(db)!;
     if (mode === 'regular' && (u.phase !== startPhase || r.stage !== 'regular')) break;
     if (mode === 'regular' && !db.rows("SELECT 1 FROM game WHERE season = ? AND status = 'pendiente' AND stage = 'regular' LIMIT 1", [u.game_season]).length) break;
@@ -394,6 +408,30 @@ const ops: Record<string, (a: any) => unknown> = {
   sign: ({ clubId, id, salary, years, clause }: { clubId: number; id: number; salary: number; years: number; clause?: number | null }) => M.signFreeAgent(db, clubId, id, salary, years, clause ?? null),
   buy: ({ clubId, id, fee, salary, years, clause }: { clubId: number; id: number; fee: number; salary: number; years: number; clause?: number | null }) => M.buyPlayer(db, clubId, id, fee, salary, years, clause ?? null),
   marketOverview: () => TR.marketOverview(db),
+  inbox: ({ clubId }: { clubId: number }) => Q.inbox(db, clubId),
+  analysis: ({ id, season }: { id: number; season?: number }) => Q.playerAnalysis(db, id, season ?? getUniverse(db)!.game_season),
+  evolution: ({ id }: { id: number }) => Q.playerEvolution(db, id),
+  markRead: ({ clubId, ids }: { clubId: number; ids?: number[] }) => {
+    if (ids?.length) db.exec(`UPDATE news SET read = 1 WHERE club_id = ? AND id IN (${ids.map(Number).join(',')})`, [clubId]);
+    else db.exec('UPDATE news SET read = 1 WHERE club_id = ?', [clubId]);
+    return Q.inbox(db, clubId);
+  },
+  loanOptions: ({ id }: { id: number }) => CL.loanOptions(db, id),
+  loanOut: ({ id, clubId }: { id: number; clubId: number }) => CL.loanOut(db, id, clubId),
+  loanIn: ({ id, share }: { id: number; share: number }) => CL.loanIn(db, id, share),
+  recallLoan: ({ id }: { id: number }) => CL.recallLoan(db, id),
+  loans: ({ clubId }: { clubId: number }) => CL.loansOf(db, clubId),
+  training: ({ clubId }: { clubId: number }) => CL.trainingOverview(db, clubId),
+  setPlan: ({ id, clubId, plan }: { id: number; clubId: number; plan: string | null }) => CL.setIndividualPlan(db, id, clubId, plan),
+  board: ({ clubId }: { clubId: number }) => {
+    const u = getUniverse(db)!;
+    const c = db.rows<{ confidence: number; chemistry: number; cash: number; budget: number }>('SELECT confidence, chemistry, cash, budget FROM club WHERE id = ?', [clubId])[0]!;
+    return { ...c, payroll: M.payroll(db, clubId), objective: CL.objectiveOf(db, u.game_season, clubId), last: CL.objectiveOf(db, u.game_season - 1, clubId) };
+  },
+  money: ({ clubId }: { clubId: number }) => {
+    const c = db.rows<{ cash: number; budget: number }>('SELECT cash, budget FROM club WHERE id = ?', [clubId])[0]!;
+    return { cash: c.cash, budget: c.budget, payroll: M.payroll(db, clubId) };
+  },
   awards: ({ season }: { season?: number }) => {
     const seasons = AW.awardSeasons(db);
     const sel = season ?? seasons[0] ?? getUniverse(db)!.game_season;
@@ -418,11 +456,12 @@ const ops: Record<string, (a: any) => unknown> = {
   home: () => Q.home(db),
   lineup: ({ clubId }: { clubId: number }) => Q.lineup(db, clubId),
   tactics: ({ clubId }: { clubId: number }) => Q.tactics(db, clubId),
-  setLineup: ({ clubId, starters, roles, shoot, tactics }: { clubId: number; starters: (number | null)[]; roles: Record<number, Role>; shoot: Record<number, Level>; tactics: Tactics }) => {
-    setLineup(db, clubId, starters, roles, shoot, tactics);
+  fits: ({ clubId }: { clubId: number }) => CL.systemFits(loadTeam(db, clubId, getUniverse(db)!.game_season).players),
+  setLineup: ({ clubId, starters, roles, shoot, tactics, minutes }: { clubId: number; starters: (number | null)[]; roles: Record<number, Role>; shoot: Record<number, Level>; tactics?: Tactics; minutes?: Record<number, number | null> }) => {
+    setLineup(db, clubId, starters, roles, shoot, tactics, minutes ?? {});
     return Q.lineup(db, clubId);
   },
-  advance: ({ mode }: { mode: 'day' | 'week' | 'regular' | 'season' }) => advance(mode),
+  advance: ({ mode }: { mode: 'day' | 'mine' | 'week' | 'regular' | 'season' }) => advance(mode),
   newSeason: async () => {
     await snapshot('antes-de-nueva-temporada');
     return startNewSeason(db);

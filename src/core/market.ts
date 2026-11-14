@@ -13,6 +13,7 @@ import { Rng, mixSeed } from './rng';
 import { type Db, bumpRevision, transaction } from './schema';
 import { getUniverse, insertPlayer, freeNumber } from './season';
 import { cupoAllowsIn, cupoAllowsOut } from './world';
+import { objectiveDelta } from './club';
 import { clubDecision, defaultClause, patience, playerDecision, preferredYears, requiredSalary, sellerWants, windowState } from './transfers';
 
 export const ROSTER_MAX = 16;
@@ -39,8 +40,14 @@ export function marketValue(p: PlayerEcon, yearsLeft: number): number {
   return round(askSalary({ ...p, morale: 70 }) * ageF * contractF, 10_000);
 }
 
+/** Masa salarial: contratos propios (menos la parte que paga el club donde está cedido) más la parte de los cedidos que recibe. */
 export function payroll(db: Db, clubId: number): number {
-  return Number(db.rows<{ s: number | null }>('SELECT SUM(salary) AS s FROM contract WHERE club_id = ?', [clubId])[0]?.s ?? 0);
+  const own = db.rows<{ s: number | null }>(
+    'SELECT SUM(CASE WHEN l.player_id IS NULL THEN c.salary ELSE c.salary * (1 - l.share) END) AS s FROM contract c LEFT JOIN loan l ON l.player_id = c.player_id WHERE c.club_id = ?',
+    [clubId],
+  )[0]?.s ?? 0;
+  const loanedIn = db.rows<{ s: number | null }>('SELECT SUM(c.salary * l.share) AS s FROM loan l JOIN contract c ON c.player_id = l.player_id WHERE l.club_id = ?', [clubId])[0]?.s ?? 0;
+  return Math.round(Number(own) + Number(loanedIn));
 }
 function rosterSize(db: Db, clubId: number): number {
   return Number(db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM player WHERE club_id = ? AND retired = 0', [clubId])[0]!.n);
@@ -59,9 +66,9 @@ export function econOf(db: Db, playerId: number) {
   return { ...r, econ: e, ask: askSalary(e), value: marketValue(e, yearsLeft), yearsLeft, season: u.game_season, day: u.game_day, phase: u.phase, userClub: u.user_club_id };
 }
 
-export function addNews(db: Db, kind: string, text: string, clubId: number | null = null, playerId: number | null = null) {
+export function addNews(db: Db, kind: string, text: string, clubId: number | null = null, playerId: number | null = null, action: Record<string, unknown> | null = null) {
   const u = getUniverse(db)!;
-  db.exec('INSERT INTO news (season, day, club_id, player_id, kind, text) VALUES (?,?,?,?,?,?)', [u.game_season, u.game_day, clubId, playerId, kind, text]);
+  db.exec('INSERT INTO news (season, day, club_id, player_id, kind, text, action) VALUES (?,?,?,?,?,?,?)', [u.game_season, u.game_day, clubId, playerId, kind, text, action ? JSON.stringify(action) : null]);
 }
 function logTransfer(db: Db, playerId: number, from: number | null, to: number | null, fee: number, salary: number | null, until: number | null, kind: string) {
   const u = getUniverse(db)!;
@@ -125,6 +132,8 @@ export function addFreeAgents(db: Db, rng: Rng, n: number, seasonArg?: number) {
   }
 }
 
+const loaned = (db: Db, playerId: number) => db.rows('SELECT 1 FROM loan WHERE player_id = ?', [playerId]).length > 0;
+const LOAN_MSG = { ok: false, message: 'Está cedido: hasta que termine la cesión no se puede traspasar, rescindir ni renovar.' } as const;
 export type MarketResult = { ok: boolean; message: string; counter?: number; patience?: number };
 function blockedWindow(phase: string): string | null {
   return phase === 'playoffs' ? 'El mercado está cerrado durante los playoffs.' : null;
@@ -159,6 +168,7 @@ export function signFreeAgent(db: Db, clubId: number, playerId: number, salary: 
 
 /** Comprar a un jugador de otro club: el club decide por el traspaso y el jugador por el sueldo. */
 export function buyPlayer(db: Db, buyer: number, playerId: number, fee: number, salary: number, years: number, clause: number | null = null): MarketResult {
+  if (loaned(db, playerId)) return { ...LOAN_MSG };
   const e = econOf(db, playerId);
   if (e.club_id === null) return signFreeAgent(db, buyer, playerId, salary, years, clause);
   const w = windowState(db);
@@ -224,6 +234,7 @@ export function offersFor(db: Db, playerId: number): { club_id: number; club: st
 }
 
 export function sellPlayer(db: Db, playerId: number, toClub: number): MarketResult {
+  if (loaned(db, playerId)) return { ...LOAN_MSG };
   const e = econOf(db, playerId);
   const w = windowState(db);
   if (!w.open) return { ok: false, message: w.label };
@@ -252,6 +263,7 @@ export function releaseCost(db: Db, playerId: number): number {
   return e.salary ? round(0.5 * e.salary * Math.max(1, e.yearsLeft + 1), 5_000) : 0;
 }
 export function releasePlayer(db: Db, playerId: number): MarketResult {
+  if (loaned(db, playerId)) return { ...LOAN_MSG };
   const e = econOf(db, playerId);
   if (e.club_id === null) return { ok: false, message: 'No tiene contrato.' };
   if (rosterSize(db, e.club_id) <= ROSTER_MIN) return { ok: false, message: `No puedes quedarte con menos de ${ROSTER_MIN} jugadores.` };
@@ -273,6 +285,7 @@ export function releasePlayer(db: Db, playerId: number): MarketResult {
 
 /** Renovar: solo en el último año de contrato. Si está descontento, pide más. */
 export function renewPlayer(db: Db, playerId: number, salary: number, years: number, clause: number | null = null): MarketResult {
+  if (loaned(db, playerId)) return { ...LOAN_MSG };
   const e = econOf(db, playerId);
   if (e.club_id === null || e.until === null) return { ok: false, message: 'No tiene contrato.' };
   if (e.yearsLeft > 0) return { ok: false, message: 'Solo se renueva en el último año de contrato.' };
@@ -299,6 +312,10 @@ export function marketInfo(db: Db, playerId: number) {
     releaseCost: e.club_id ? releaseCost(db, playerId) : 0, morale: e.econ.morale, injury_games: e.injury_games,
     canRenew: e.club_id !== null && e.yearsLeft <= 0, marketOpen: blockedWindow(e.phase) === null, phase: e.phase,
     window: windowState(db),
+    loan: db.rows<{ owner_id: number; club_id: number; owner: string; club: string; share: number }>(
+      'SELECT l.owner_id, l.club_id, o.name AS owner, c.name AS club, l.share FROM loan l JOIN club o ON o.id = l.owner_id JOIN club c ON c.id = l.club_id WHERE l.player_id = ?',
+      [playerId],
+    )[0] ?? null,
     clause: db.rows<{ clause: number | null }>('SELECT clause FROM contract WHERE player_id = ?', [playerId])[0]?.clause ?? null,
     age: e.econ.age,
     preferredYears: preferredYears(e.econ.age),
@@ -360,8 +377,10 @@ export function offseason(db: Db, oldSeason: number, newSeason: number, userClub
     // Lo que no se gasta del presupuesto salarial pasa a la caja; lo que se pasa, sale de ella.
     const cash = c.cash + (c.budget - wages) + pz;
     db.exec('INSERT OR REPLACE INTO club_season_finance VALUES (?,?,?,?,?,?,?,?)', [oldSeason, c.id, c.budget, wages, pz, tIn, tOut, cash]);
-    // Presupuesto nuevo: sube con los premios, baja si hay deudas.
-    const factor = Math.max(0.85, Math.min(1.15, 1 + pz / Math.max(1, c.budget) * 0.5 + (cash < 0 ? -0.1 : 0)));
+    // Presupuesto nuevo: premios, objetivo de la directiva, deudas y caja de sobra que se reinvierte.
+    const obj = objectiveDelta(db, oldSeason, c.id);
+    const reinvest = cash > c.budget * 0.9 ? 0.05 : 0;
+    const factor = Math.max(0.82, Math.min(1.22, 1 + pz / Math.max(1, c.budget) * 0.5 + obj + reinvest + (cash < 0 ? -0.1 : 0)));
     db.exec('UPDATE club SET cash = ?, budget = ? WHERE id = ?', [cash, round(c.budget * factor, 50_000), c.id]);
   }
 

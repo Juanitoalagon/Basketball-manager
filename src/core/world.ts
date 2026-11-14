@@ -13,9 +13,11 @@ import { generateRoster } from './generate';
 import { CLUB_COLORS, COMP_INFO, CUPO_RULES, FOREIGN_CLUBS, type Cupo, cupoOf, makeName, pickNationality } from './names';
 import { Rng, mixSeed } from './rng';
 import { type Db, bumpRevision, transaction } from './schema';
-import { COMP, getUniverse, insertPlayer, freeNumber, roundRobin, scheduleKnockout, standings, type StandingRow } from './season';
+import { COMP, getUniverse, insertPlayer, refreshAiTactics, freeNumber, roundRobin, scheduleKnockout, standings, type StandingRow } from './season';
 import { addNews, askSalary, payroll, type MarketResult } from './market';
 import { aiMarketDay } from './transfers';
+import { assistantReport, updateChemistry } from './club';
+import { nextKoDay, seasonCalendar } from './calendar';
 
 export const EURO = [4, 5, 6] as const;
 const EUROLEAGUE_LICENSES = ['RMA', 'FCB', 'BAS', 'VBC'];
@@ -144,6 +146,7 @@ export function scheduleEurope(db: Db, season: number, seed: number): void {
   if (db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM comp_group WHERE season = ?', [season])[0]!.n) return;
   const rng = new Rng(mixSeed(seed, season * 13 + 5));
   const members = euroMembers(db, season);
+  const cal = seasonCalendar(season);
   for (const comp of EURO) {
     const teams = rng.shuffle([...members[comp]!]).slice(0, 16);
     if (teams.length < 16) continue;
@@ -154,7 +157,7 @@ export function scheduleEurope(db: Db, season: number, seed: number): void {
     for (const [g, ids] of Object.entries(groups)) {
       for (const id of ids) db.exec('INSERT INTO comp_group VALUES (?,?,?,?)', [season, comp, id, g]);
       for (const [d, h, a] of roundRobin(ids, rng)) {
-        db.exec("INSERT INTO game (season, competition_id, stage, day, home_id, away_id, seed, status) VALUES (?,?, 'grupos', ?,?,?,?, 'pendiente')", [season, comp, d * 2, h, a, rng.int(1, 2 ** 31 - 1)]);
+        db.exec("INSERT INTO game (season, competition_id, stage, day, round, home_id, away_id, seed, status) VALUES (?,?, 'grupos', ?,?,?,?,?, 'pendiente')", [season, comp, cal.euro[d], d, h, a, rng.int(1, 2 ** 31 - 1)]);
       }
     }
   }
@@ -198,15 +201,16 @@ export function afterDay(db: Db, season: number, day: number, seed: number, stag
   const ev: string[] = [];
   const has = (comp: number) => db.rows<{ n: number }>('SELECT COUNT(*) AS n FROM playoff_series WHERE season = ? AND competition_id = ?', [season, comp])[0]!.n > 0;
   // Copa del Rey: los 8 primeros al acabar la primera vuelta.
-  if (day === 17 && !has(3) && db.rows<{ n: number }>("SELECT COUNT(*) AS n FROM game WHERE season = ? AND competition_id = 1 AND stage = 'regular' AND day <= 17 AND status = 'pendiente'", [season])[0]!.n === 0) {
+  const cal = seasonCalendar(season);
+  if (day >= cal.league[17]! && !has(3) && db.rows<{ n: number }>("SELECT COUNT(*) AS n FROM game WHERE season = ? AND competition_id = 1 AND stage = 'regular' AND round <= 17 AND status = 'pendiente'", [season])[0]!.n === 0) {
     const t = standings(db, season, COMP.ACB);
     if (t.length >= 8) {
       createSeries(db, season, 3, [[t[0]!, 1, t[7]!, 8], [t[3]!, 4, t[4]!, 5], [t[1]!, 2, t[6]!, 7], [t[2]!, 3, t[5]!, 6]]);
-      scheduleKnockout(db, season, 3, 18, seed);
-      ev.push(`Copa del Rey: ${t.slice(0, 8).map((r) => r.short).join(', ')} se clasifican para los cuartos (día 18).`);
+      scheduleKnockout(db, season, 3, cal.copa.find((d) => d > day) ?? day + 1, seed);
+      ev.push(`Copa del Rey: ${t.slice(0, 8).map((r) => r.short).join(', ')} se clasifican para los cuartos.`);
     }
   }
-  if (stagesPlayed.has('copa')) ev.push(...scheduleKnockout(db, season, 3, day + 1, seed, day).events);
+  if (stagesPlayed.has('copa')) ev.push(...scheduleKnockout(db, season, 3, nextKoDay(season, 3, day), seed, day).events);
   // Europa: cruces al acabar los grupos.
   for (const comp of EURO) {
     const groupsDone = db.rows<{ n: number }>("SELECT COUNT(*) AS n FROM game WHERE season = ? AND competition_id = ? AND stage = 'grupos' AND status = 'pendiente'", [season, comp])[0]!.n === 0;
@@ -215,15 +219,21 @@ export function afterDay(db: Db, season: number, day: number, seed: number, stag
       const A = groupStandings(db, season, comp, 'A');
       const B = groupStandings(db, season, comp, 'B');
       createSeries(db, season, comp, [[A[0]!, 1, B[3]!, 8], [B[1]!, 4, A[2]!, 5], [B[0]!, 2, A[3]!, 7], [A[1]!, 3, B[2]!, 6]]);
-      scheduleKnockout(db, season, comp, Math.max(30, day + 2), seed);
+      scheduleKnockout(db, season, comp, nextKoDay(season, comp, day), seed);
       ev.push(`${COMP_INFO[comp]!.name}: se cierra la fase de grupos.`);
     } else if (compsPlayed.has(comp) && has(comp)) {
-      ev.push(...scheduleKnockout(db, season, comp, day < 32 ? day + 2 : day + 1, seed, day).events);
+      ev.push(...scheduleKnockout(db, season, comp, nextKoDay(season, comp, day), seed, day).events);
     }
   }
-  if (day % 4 === 0) aiInSeason(db, season, mixSeed(seed, day * 101));
+  if (day % 6 === 0) {
+    aiInSeason(db, season, mixSeed(seed, day * 101));
+    updateChemistry(db, season);
+    const u = getUniverse(db)!;
+    refreshAiTactics(db, season, u.user_club_id, new Rng(mixSeed(seed, day * 313)));
+    if (u.user_club_id) assistantReport(db, u.user_club_id);
+  }
   // Paciencia nueva a mitad de temporada (tras la primera vuelta).
-  if (day === 17) db.exec('DELETE FROM negotiation WHERE season = ?', [season]);
+  if (day === cal.league[17]) db.exec('DELETE FROM negotiation WHERE season = ?', [season]);
   ev.push(...aiMarketDay(db, seed));
   return ev;
 }

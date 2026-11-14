@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { TABLES } from '../core/schema';
 import { COMP_INFO } from '../core/names';
+import { FACE_STYLES, Face, type FaceStyle, getFaceStyle, setFaceStyle } from './Face';
 import type * as Q from '../core/queries';
 import type { DayReport } from '../core/season';
 import { call, cancelLoad, setProgressListener } from '../db/client';
@@ -25,6 +26,28 @@ function restoreScroll(y: number) {
     if (Math.abs(window.scrollY - y) > 2 && performance.now() - t0 < 1500) requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
+}
+
+/** Ajustes: estilo de las caras generadas (se guarda en este dispositivo). */
+function FaceSettings() {
+  const [st, setSt] = useState<FaceStyle>(getFaceStyle());
+  return (
+    <section>
+      <h3>Estilo de las caras</h3>
+      <div className="opts">
+        {FACE_STYLES.map(([k, label, hint]) => (
+          <button key={k} className={st === k ? 'on' : ''} aria-pressed={st === k} onClick={() => { setFaceStyle(k); setSt(k); }}>
+            <span className="row tight" style={{ marginTop: 0 }}>
+              {[101, 202, 303].map((id, i) => <Face key={`${k}${id}`} id={id} nationality={['ES', 'US', 'FR'][i]!} age={[24, 29, 33][i]!} colors={'["#0b5f2a","#ffffff","#7a1f8a"]'} size={30} styleOverride={k} />)}
+            </span>
+            {label}
+            <small>{hint}</small>
+          </button>
+        ))}
+      </div>
+      <p className="muted small">Las caras solo se inventan para jugadores generados; los reales importados llevan su dorsal.</p>
+    </section>
+  );
 }
 
 export function App() {
@@ -340,6 +363,7 @@ function DataScreen({ st, setSt, onChanged }: { st: Status; setSt: (s: Status) =
   return (
     <div>
       <h2>Datos y copias</h2>
+      <FaceSettings />
       <p className="muted">Versión {st.appVersion} · esquema {st.schemaVersion}</p>
       {error && <p className="error" role="alert">{error}</p>}
       {msg && <p className="ok" role="status">{msg}</p>}

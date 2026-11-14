@@ -4,6 +4,7 @@ import type * as Q from '../core/queries';
 import type { Focus, Intensity, Training } from '../core/world';
 import { call } from '../db/client';
 import { Face } from './Face';
+import { ATTRS } from '../core/attributes';
 import { CupoSummary, CupoTag, Loading, type Nav, useData } from './kit';
 import { eur } from './market';
 
@@ -112,6 +113,51 @@ export function TrainingScreen({ clubId }: { clubId: number }) {
         <Result msg={msg} />
       </section>
     </div>
+  );
+}
+
+type TrainingOv = { slots: number; used: number; players: { id: number; name: string; pos1: string; age: number; youth: number; ovr: number; plan: string | null; nationality: string; origin: string }[] };
+const GROUP_PLANS: [string, string][] = [['grupo:off', 'Ataque (todo)'], ['grupo:def', 'Defensa (todo)'], ['grupo:fis', 'Físico'], ['grupo:men', 'Mental']];
+const ARQ_PLANS: [string, string][] = [['arq:tirador', 'Tirador'], ['arq:3d', '3&D'], ['arq:director', 'Director'], ['arq:anotador', 'Anotador'], ['arq:penetrador', 'Penetrador'], ['arq:defensor', 'Defensor'], ['arq:protector', 'Protector del aro'], ['arq:reboteador', 'Reboteador'], ['arq:poste', 'Poste bajo'], ['arq:abierto', 'Pívot abierto']];
+const POS_PLANS: [string, string][] = [['pos:PG', 'Aprender a jugar de base'], ['pos:SG', 'Aprender de escolta'], ['pos:SF', 'Aprender de alero'], ['pos:PF', 'Aprender de ala-pívot'], ['pos:C', 'Aprender de pívot']];
+export function planLabel(plan: string | null): string {
+  if (!plan) return 'Con el grupo';
+  const all = [...GROUP_PLANS, ...ARQ_PLANS, ...POS_PLANS];
+  const hit = all.find(([k]) => k === plan);
+  if (hit) return hit[1];
+  if (plan.startsWith('attr:')) return ATTRS.find((a) => a.key === plan.slice(5))?.label ?? plan;
+  return plan;
+}
+
+/** Entrenamiento individual: un plan por jugador (plazas según las instalaciones). */
+export function IndividualTraining({ clubId, nav }: { clubId: number; nav: Nav }) {
+  const { data, error, reload } = useData<TrainingOv>('training', { clubId }, [clubId]);
+  const [msg, setMsg] = useState<Msg>(null);
+  if (!data) return <Loading error={error} />;
+  const set = async (id: number, plan: string | null) => {
+    setMsg(await call<Msg>('setPlan', { id, clubId, plan }));
+    reload();
+  };
+  return (
+    <section>
+      <h3>Entrenamiento individual · {data.used}/{data.slots} plazas</h3>
+      <p className="muted small">Un plan concreto para cada jugador, además del foco del equipo: un atributo, un grupo, un arquetipo (por ejemplo, convertir a un alero en 3&D) o aprender una posición nueva. Se nota en la evolución de verano: mucho en los jóvenes (sobre todo en la cantera) y poco en los veteranos. Más plazas mejorando las instalaciones.</p>
+      {msg && <p className={msg.ok ? 'ok' : 'error'}>{msg.message}</p>}
+      {data.players.map((p) => (
+        <div key={p.id} className="trow">
+          <span className="tap" onClick={() => nav.player(p.id)}>
+            <b>{p.name}</b> <span className="muted small">{p.pos1} · {p.ovr} · {p.age} años{p.youth ? ' · cantera' : ''}</span>
+          </span>
+          <select value={p.plan ?? ''} onChange={(e) => void set(p.id, e.target.value || null)} aria-label={`Plan de ${p.name}`}>
+            <option value="">Con el grupo</option>
+            <optgroup label="Grupos">{GROUP_PLANS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</optgroup>
+            <optgroup label="Arquetipo">{ARQ_PLANS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</optgroup>
+            <optgroup label="Atributo concreto">{ATTRS.filter((a) => a.group !== 'men').map((a) => <option key={a.key} value={`attr:${a.key}`}>{a.label}</option>)}</optgroup>
+            <optgroup label="Posición">{POS_PLANS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</optgroup>
+          </select>
+        </div>
+      ))}
+    </section>
   );
 }
 

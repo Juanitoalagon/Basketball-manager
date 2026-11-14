@@ -11,11 +11,13 @@ import type { Line } from '../core/stats';
 import { call, cancelLoad, setProgressListener } from '../db/client';
 import type { AdvanceResult, LoadProgress } from '../db/protocol';
 import { DotMap, ZoneMap } from './ShotMap';
-import { ContractCard, FinanceScreen, MarketBanner, NewsList, eur } from './market';
+import { ContractCard, FinanceScreen, MarketBanner, MoneyBar, NewsList, eur } from './market';
 import type { Level, Role, Tactics } from '../core/engine';
 import { Face, parseColors } from './Face';
 import { AwardsView, ClubHistory, PlayerCompare, RecordsView } from './history';
-import { TrainingScreen, YouthScreen } from './club';
+import { IndividualTraining, TrainingScreen, YouthScreen } from './club';
+import { BoardCard, InboxPanel } from './inbox';
+import { AnalysisView, EvolutionView } from './analysis';
 import { TacticsEditor, TendencyEditor } from './tactics';
 import { PreviewView } from './preview';
 import { Back, type Col, CupoSummary, CupoTag, Loading, type Nav, POS_ORDER, Table, Tabs, Tag, clock, posSort, shortName, useSticky, f0, f1, f2, mins, pc, pcRaw, seasonLabel, signed, useData } from './kit';
@@ -24,13 +26,20 @@ type HomeData = NonNullable<ReturnType<typeof Q.home>> & { club: NonNullable<Ret
 type GameRow = Q.GameListRow;
 
 const per = (l: Line, k: keyof Line) => (l.gp ? (l[k] as number) / l.gp : null);
+const DOW = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
+const MONTHS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+/** «2026-10-03» → «3 oct» (o «sáb 3 oct»). */
+export function fmtDate(iso: string, withDay = false): string {
+  const d = new Date(`${iso}T12:00:00Z`);
+  return `${withDay ? `${DOW[d.getUTCDay()]} ` : ''}${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+}
 const STAGE_LABEL: Record<string, string> = { regular: 'Liga regular', playoffs: 'Playoffs', copa: 'Copa del Rey', grupos: 'Fase de grupos', eliminatoria: 'Eliminatoria' };
 const stageLabel = (s: string) => STAGE_LABEL[s] ?? s;
 const COMP_NAME: Record<number, string> = { 1: 'Liga ACB', 2: 'Primera FEB', 3: 'Copa del Rey', 4: 'EuroLeague', 5: 'EuroCup', 6: 'Basketball Champions League' };
 const AWARD_NAME: Record<string, string> = { mvp: 'MVP', joven: 'Mejor joven', defensor: 'Mejor defensor', sexto: 'Sexto hombre', mejorado: 'Más mejorado', quinteto: 'Quinteto ideal', mvp_final: 'MVP de la final' };
 const COMP_SHORT: Record<number, string> = { 1: 'ACB', 2: 'FEB', 3: 'Copa', 4: 'EL', 5: 'EC', 6: 'BCL' };
 const roundLabel = (stage: string, day: number, round?: number | null) =>
-  stage === 'regular' ? `J${round ?? day}` : stage === 'grupos' ? `J${Math.round(day / 2)}` : stage === 'playoffs' ? 'PO' : 'Elim.';
+  stage === 'regular' ? `J${round ?? day}` : stage === 'grupos' ? `J${round ?? Math.round(day / 2)}` : stage === 'playoffs' ? 'PO' : 'Elim.';
 /** Etiqueta corta de un partido: competición (si no es la liga) y jornada. */
 export function GameTag({ comp, stage, day, round }: { comp: number; stage: string; day: number; round?: number | null }) {
   return (
@@ -72,7 +81,7 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
     return () => setProgressListener(null);
   }, []);
 
-  const go = async (mode: 'day' | 'week' | 'regular' | 'season') => {
+  const go = async (mode: 'day' | 'mine' | 'week' | 'regular' | 'season') => {
     setBusy(mode);
     setErr(null);
     setProgress(null);
@@ -116,7 +125,7 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
   return (
     <div>
       <section className="hero">
-        <div className="muted">{data.club.comp} · Temporada {seasonLabel(u.game_season)} · {u.phase === 'playoffs' ? 'Playoffs' : u.phase === 'fin' ? 'Temporada terminada' : u.game_day === 0 ? 'Pretemporada' : `Jornada ${u.game_day} de 34`}</div>
+        <div className="muted">{data.club.comp} · Temporada {seasonLabel(u.game_season)} · {u.phase === 'playoffs' ? 'Playoffs' : u.phase === 'fin' ? 'Temporada terminada' : u.game_day === 0 ? 'Pretemporada' : `Jornada ${data.round} de 34${data.today ? ` · ${fmtDate(data.today)}` : ''}`}</div>
         <h2 className="tap" onClick={() => nav.club(data.club!.id)}>{data.club.name}</h2>
         <div className="big">
           {me ? `${me.w}-${me.l}` : '0-0'} <span className="muted">· {data.position}º</span>
@@ -124,12 +133,14 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
       </section>
 
       {err && <p className="error">{err}</p>}
+      <MoneyBar clubId={data.club.id} />
+      <InboxPanel clubId={data.club.id} nav={nav} />
 
       <section>
         <h3>Próximo partido</h3>
         {data.next ? (
           <p className="tap" onClick={() => nav.club(data.next!.home_id === data.club!.id ? data.next!.away_id : data.next!.home_id)}>
-            <GameTag comp={data.next.competition_id} stage={data.next.stage} day={data.next.day} round={data.next.round} /> {stageLabel(data.next.stage)} · día {data.next.day} · {data.next.home_id === data.club.id ? `contra ${data.next.away} (en casa)` : `en la pista de ${data.next.home}`}
+            <GameTag comp={data.next.competition_id} stage={data.next.stage} day={data.next.day} round={data.next.round} /> {stageLabel(data.next.stage)} · {data.nextDate ? fmtDate(data.nextDate, true) : `día ${data.next.day}`} · {data.next.home_id === data.club.id ? `contra ${data.next.away} (en casa)` : `en la pista de ${data.next.home}`}
           </p>
         ) : (
           <p className="muted">{u.phase === 'fin' ? 'La temporada ha terminado.' : u.phase === 'playoffs' ? 'Tu equipo no juega estos playoffs. Puedes seguir simulando.' : 'Sin partidos pendientes.'}</p>
@@ -138,7 +149,12 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
           <div className="row">
             {data.next && data.nextDay === data.next.day && <button disabled={!!busy} onClick={nav.live}>▶ Jugar en directo</button>}
             {data.next && <button className="sec" onClick={() => setShowPrev(!showPrev)}>{showPrev ? 'Ocultar previa' : 'Previa'}</button>}
-            <button className={data.next && data.nextDay === data.next.day ? 'sec' : ''} disabled={!!busy || data.nextDay === null && u.phase !== 'regular'} onClick={() => go('day')}>Simular jornada</button>
+            {data.next && data.nextDay === data.next.day
+              ? <button className="sec" disabled={!!busy} onClick={() => go('day')}>Simular partido</button>
+              : <>
+                  {data.next && <button disabled={!!busy} onClick={() => go('mine')}>Hasta mi partido</button>}
+                  <button className={data.next ? 'sec' : ''} disabled={!!busy || data.nextDay === null && u.phase !== 'regular'} onClick={() => go('day')}>Siguiente día</button>
+                </>}
             <button className="sec" disabled={!!busy} onClick={() => go('week')}>5 jornadas</button>
             {u.phase === 'regular' && <button className="sec" disabled={!!busy} onClick={() => go('regular')}>Hasta los playoffs</button>}
             <button className="sec" disabled={!!busy} onClick={() => go('season')}>Hasta el final</button>
@@ -189,7 +205,6 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
       )}
 
       <MarketBanner nav={nav} />
-      <NewsList clubId={data.club.id} nav={nav} />
 
       <section>
         <h3>Últimos resultados</h3>
@@ -204,6 +219,7 @@ export function HomeScreen({ nav, onChanged, log, setLog }: { nav: Nav; onChange
         )}
       </section>
 
+      <BoardCard clubId={data.club.id} />
       <section>
         <h3>Clasificación</h3>
         <Table
@@ -237,7 +253,7 @@ export function SquadScreen({ clubId, nav, isMine, onBack }: { clubId: number; n
     return (
       <div>
         <Tabs<V> value={view} onChange={setView} options={[['plantilla', 'Plantilla'], ['quinteto', 'Quinteto'], ['tacticas', 'Tácticas'], ['entreno', 'Entreno'], ['cantera', 'Cantera'], ['finanzas', 'Finanzas'], ['historia', 'Historia']]} />
-        {view === 'plantilla' ? <SquadTable clubId={clubId} nav={nav} /> : view === 'quinteto' ? <LineupEditor clubId={clubId} nav={nav} /> : view === 'tacticas' ? <TacticsEditor clubId={clubId} /> : view === 'entreno' ? <TrainingScreen clubId={clubId} /> : view === 'cantera' ? <YouthScreen clubId={clubId} nav={nav} /> : view === 'historia' ? <ClubHistory clubId={clubId} nav={nav} /> : <FinanceScreen clubId={clubId} nav={nav} />}
+        {view === 'plantilla' ? <SquadTable clubId={clubId} nav={nav} /> : view === 'quinteto' ? <LineupEditor clubId={clubId} nav={nav} /> : view === 'tacticas' ? <TacticsEditor clubId={clubId} /> : view === 'entreno' ? <><TrainingScreen clubId={clubId} /><IndividualTraining clubId={clubId} nav={nav} /></> : view === 'cantera' ? <YouthScreen clubId={clubId} nav={nav} /> : view === 'historia' ? <ClubHistory clubId={clubId} nav={nav} /> : <FinanceScreen clubId={clubId} nav={nav} />}
       </div>
     );
   }
@@ -274,10 +290,12 @@ function SquadTable({ clubId, nav, onBack, tabs }: { clubId: number; nav: Nav; o
         <span><span className="num">{r.number ?? ''}</span> {spanish && <CupoTag nationality={r.nationality} />} {shortName(r.name)}{r.injury_games > 0 && <span className="bad" title={r.injury ?? ''}> ✚</span>}</span>
       </span>
     ),
-  }];
+  },
+  { key: 'pos', label: 'Pos.', value: (r) => posSort(r.pos1, r.pos2), render: (r) => `${r.pos1}${r.pos2 ? `/${r.pos2}` : ''}` },
+  { key: 'ovr', label: 'Media', title: 'Media en su posición', value: (r) => r.ovr, render: (r) => <b className={`ovr ${ovrClass(r.ovr)}`}>{r.ovr}</b> },
+  ];
   const groups: Record<Group, Col<SquadRow>[]> = {
     basic: [
-      { key: 'pos', label: 'Pos.', value: (r) => posSort(r.pos1, r.pos2), render: (r) => `${r.pos1}${r.pos2 ? `/${r.pos2}` : ''}` },
       { key: 'gp', label: 'PJ', value: (r) => L(r)?.gp ?? 0 },
       { key: 'min', label: 'MIN', value: (r) => (L(r) ? L(r)!.sec / 60 / L(r)!.gp : null), render: (r) => (L(r) ? mins(L(r)!.sec, L(r)!.gp) : '—') },
       { key: 'pts', label: 'PTS', value: pg('pts'), render: (r) => f1(pg('pts')(r)) },
@@ -312,10 +330,8 @@ function SquadTable({ clubId, nav, onBack, tabs }: { clubId: number; nav: Nav; o
       { key: 'pm', label: '+/-', value: (r) => L(r)?.pm ?? null, render: (r) => (L(r) ? signed(L(r)!.pm) : '—') },
     ],
     bio: [
-      { key: 'pos', label: 'Pos.', value: (r) => posSort(r.pos1, r.pos2), render: (r) => `${r.pos1}${r.pos2 ? `/${r.pos2}` : ''}` },
       { key: 'age', label: 'Edad', value: (r) => r.age },
       { key: 'h', label: 'Altura', value: (r) => r.height_cm, render: (r) => `${(r.height_cm / 100).toFixed(2).replace('.', ',')}` },
-      { key: 'ovr', label: 'Media', value: (r) => r.ovr },
       { key: 'pot', label: 'Pot.', title: 'Potencial estimado por tus ojeadores', value: (r) => r.potential_est },
       { key: 'mor', label: 'Moral', value: (r) => r.morale, render: (r) => <span className={r.morale >= 60 ? 'good' : r.morale < 40 ? 'bad' : ''}>{r.morale}</span> },
       { key: 'sal', label: 'Sueldo', value: (r) => r.salary ?? 0, render: (r) => eur(r.salary) },
@@ -381,8 +397,11 @@ function PositionEditor({ id, pos1, pos2, posOvr, onDone }: { id: number; pos1: 
 }
 
 type PlayerData = ReturnType<typeof Q.playerDetail>;
-type PTab = 'res' | 'attr' | 'tend' | 'stats' | 'log' | 'map' | 'cmp' | 'real';
+type PTab = 'res' | 'attr' | 'tend' | 'ana' | 'evo' | 'stats' | 'log' | 'map' | 'cmp' | 'real';
 
+export function ovrClass(v: number) {
+  return v >= 75 ? 'o4' : v >= 68 ? 'o3' : v >= 60 ? 'o2' : v >= 50 ? 'o1' : 'o0';
+}
 function attrClass(v: number) {
   return v >= 80 ? 'a4' : v >= 65 ? 'a3' : v >= 50 ? 'a2' : v >= 35 ? 'a1' : 'a0';
 }
@@ -406,26 +425,28 @@ export function PlayerScreen({ id, nav, myClub, onChanged }: { id: number; nav: 
               {p.number !== null ? `#${p.number} · ` : ''}{p.club ?? (p.youth_club ? `Cantera · ${p.youth_club}` : 'Sin club')} · {POS_LABEL[p.pos1 as Pos]}{p.pos2 ? ` / ${POS_LABEL[p.pos2 as Pos]}` : ''}
             </div>
             <h2>{p.name}</h2>
+            <div className="keyline">
+              <b className="kpos">{String(p.pos1)}{p.pos2 ? `/${p.pos2}` : ''}</b>
+              <b className={`ovr big ${ovrClass(data.ovr)}`}>{data.ovr}</b>
+              <span className="muted small">{data.prevOvr !== null && data.ovr !== data.prevOvr ? `${signed(data.ovr - data.prevOvr)} · ` : ''}pot. {String(p.potential_est)} · {data.age} años</span>
+            </div>
             <div className="archs">{data.archetypes.map((a) => <span key={a.key} title={a.hint}>{a.label}</span>)}</div>
             {!data.mine && <WatchButton id={id} watched={data.watched} onDone={reload} />}
           </div>
         </div>
         <div className="chips">
-          <span>{data.age} años</span>
           <span>{(Number(p.height_cm) / 100).toFixed(2).replace('.', ',')} m</span>
           <span>{p.weight_kg} kg</span>
           <span>Env. {(Number(p.wingspan_cm) / 100).toFixed(2).replace('.', ',')} m</span>
           <span><CupoTag nationality={String(p.nationality)} full /></span>
           <span>{p.hand === 'L' ? 'Zurdo' : 'Diestro'}</span>
         </div>
-        <div className="big">
-          {data.ovr} <span className="muted small">media{data.prevOvr !== null ? ` (${signed(data.ovr - data.prevOvr)})` : ''} · potencial estimado {p.potential_est}</span>
-        </div>
+        {p.mood_note && <p className="small" style={{ margin: '6px 0 0' }}>Moral {String(p.morale)} · <span className="muted">{String(p.mood_note)}</span>{Number(p.fatigue) > 0.25 && <span className="warn"> · cansado ({Math.round(Number(p.fatigue) * 100)} %)</span>}</p>}
         {p.origin === 'real'
           ? <p className="muted small">Jugador real <Tag kind="real" /> · atributos, edad y altura <Tag kind="est" /> · estadísticas del juego <Tag kind="sim" /></p>
           : <p className="muted small">Jugador generado <Tag kind="est" /> · estadísticas <Tag kind="sim" /></p>}
       </section>
-      <Tabs<PTab> small value={tab} onChange={setTab} options={[['res', 'Resumen'], ['attr', 'Atributos'], ['tend', 'Tendencias'], ['stats', 'Estadísticas'], ['log', 'Partidos'], ['map', 'Mapa de tiro'], ['cmp', 'Comparar'], ...(p.origin === 'real' ? [['real', 'Datos reales'] as [PTab, string]] : [])]} />
+      <Tabs<PTab> small value={tab} onChange={setTab} options={[['res', 'Resumen'], ['attr', 'Atributos'], ['tend', 'Tendencias'], ['ana', 'Análisis'], ['evo', 'Evolución'], ['stats', 'Estadísticas'], ['log', 'Partidos'], ['map', 'Mapa de tiro'], ['cmp', 'Comparar'], ...(p.origin === 'real' ? [['real', 'Datos reales'] as [PTab, string]] : [])]} />
 
       {tab === 'res' && (
         <section>
@@ -465,7 +486,9 @@ export function PlayerScreen({ id, nav, myClub, onChanged }: { id: number; nav: 
         </section>
       )}
 
-      {tab === 'tend' && <TendencyEditor id={id} />}
+      {tab === 'tend' && <TendencyEditor id={id} attrs={data.attrs} />}
+      {tab === 'ana' && <AnalysisView id={id} season={data.season} />}
+      {tab === 'evo' && <EvolutionView id={id} />}
       {tab === 'cmp' && <PlayerCompare a={data} myClub={myClub} nav={nav} />}
 
       {tab === 'attr' && (
@@ -573,12 +596,71 @@ function PlayerShotMap({ id, seasons }: { id: number; seasons: number[] }) {
 /* ───────────────────────────── Partidos ───────────────────────────── */
 
 export function GamesScreen({ clubId, nav }: { clubId: number; nav: Nav }) {
-  const [mode, setMode] = useSticky<'mine' | 'days'>('games.mode', 'mine');
+  const [mode, setMode] = useSticky<'mine' | 'cal' | 'days'>('games.mode', 'mine');
   return (
     <div>
-      <Tabs<'mine' | 'days'> value={mode} onChange={setMode} options={[['mine', 'Mi calendario'], ['days', 'Jornadas']]} />
-      {mode === 'mine' ? <MySchedule clubId={clubId} nav={nav} /> : <Rounds nav={nav} clubId={clubId} />}
+      <Tabs<'mine' | 'cal' | 'days'> value={mode} onChange={setMode} options={[['mine', 'Mis partidos'], ['cal', 'Calendario'], ['days', 'Jornadas']]} />
+      {mode === 'mine' ? <MySchedule clubId={clubId} nav={nav} /> : mode === 'cal' ? <MonthCalendar clubId={clubId} nav={nav} /> : <Rounds nav={nav} clubId={clubId} />}
     </div>
+  );
+}
+
+const MONTH_NAMES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+/** Calendario mensual de tu club: todas las competiciones, con resultado y color por competición. */
+function MonthCalendar({ clubId, nav }: { clubId: number; nav: Nav }) {
+  const { data, error } = useData<(GameRow & { date: string | null })[]>('schedule', { clubId }, [clubId]);
+  const months = useMemo(() => [...new Set((data ?? []).filter((g) => g.date).map((g) => g.date!.slice(0, 7)))], [data]);
+  const nextIdx = (data ?? []).findIndex((g) => g.status === 'pendiente');
+  const defaultMonth = (nextIdx >= 0 ? data![nextIdx]!.date : data?.[data.length - 1]?.date)?.slice(0, 7) ?? months[0];
+  const [month, setMonth] = useSticky<string | null>(`cal.month.${clubId}`, null);
+  if (!data) return <Loading error={error} />;
+  const m = month && months.includes(month) ? month : defaultMonth;
+  if (!m) return <p className="muted">Sin partidos.</p>;
+  const [y, mo] = m.split('-').map(Number) as [number, number];
+  const first = new Date(Date.UTC(y, mo - 1, 1));
+  const daysIn = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+  const lead = (first.getUTCDay() + 6) % 7; // lunes primero
+  const byDate = new Map<string, (GameRow & { date: string | null })[]>();
+  for (const g of data) if (g.date) (byDate.get(g.date) ?? byDate.set(g.date, []).get(g.date)!).push(g);
+  const idx = months.indexOf(m);
+  const cells: (number | null)[] = [...Array(lead).fill(null), ...Array.from({ length: daysIn }, (_, i) => i + 1)];
+  while (cells.length % 7) cells.push(null);
+  return (
+    <section>
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <button className="sec" disabled={idx <= 0} onClick={() => setMonth(months[idx - 1]!)}>‹</button>
+        <b style={{ textTransform: 'capitalize' }}>{MONTH_NAMES[mo - 1]} {y}</b>
+        <button className="sec" disabled={idx >= months.length - 1} onClick={() => setMonth(months[idx + 1]!)}>›</button>
+      </div>
+      <div className="calgrid">
+        {['L', 'M', 'X', 'J', 'V', 'S', 'D'].map((d) => <div key={d} className="calh">{d}</div>)}
+        {cells.map((d, i) => {
+          if (d === null) return <div key={i} className="calc empty" />;
+          const iso = `${m}-${String(d).padStart(2, '0')}`;
+          const gs = byDate.get(iso) ?? [];
+          return (
+            <div key={i} className={`calc ${gs.length ? 'has' : ''}`}>
+              <span className="cd">{d}</span>
+              {gs.map((g) => {
+                const home = g.home_id === clubId;
+                const mine = home ? g.home_pts : g.away_pts;
+                const theirs = home ? g.away_pts : g.home_pts;
+                const res = g.status === 'jugado' ? (mine! > theirs! ? 'G' : 'P') : null;
+                return (
+                  <div key={g.id} className={`calg c${g.competition_id} ${res === 'G' ? 'win' : res === 'P' ? 'loss' : ''}`} onClick={() => (g.status === 'jugado' ? nav.game(g.id) : nav.club(home ? g.away_id : g.home_id))}>
+                    <span>{home ? '' : '@'}{home ? g.away_short : g.home_short}</span>
+                    {res && <b>{res} {mine}-{theirs}</b>}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+      <p className="muted small">
+        <span className="compbadge">Liga</span><span className="compbadge c3">Copa</span><span className="compbadge c4">EL</span><span className="compbadge c5">EC</span><span className="compbadge c6">BCL</span> · @ = fuera de casa · toca un partido jugado para ver la hoja, o uno pendiente para ver al rival.
+      </p>
+    </section>
   );
 }
 
@@ -602,7 +684,7 @@ function MySchedule({ clubId, nav }: { clubId: number; nav: Nav }) {
 
 function Rounds({ nav, clubId }: { nav: Nav; clubId: number }) {
   const [comp, setComp] = useSticky('rounds.comp', 1);
-  const days = useData<{ day: number; stage: string; played: number; total: number }[]>('compDays', { comp }, [comp]);
+  const days = useData<{ day: number; stage: string; played: number; total: number; round: number | null; date: string | null }[]>('compDays', { comp }, [comp]);
   const [day, setDay] = useState<number | null>(null);
   const current = useMemo(() => {
     if (!days.data?.length) return null;
@@ -619,7 +701,7 @@ function Rounds({ nav, clubId }: { nav: Nav; clubId: number }) {
         <div className="row">
           <button className="sec" disabled={idx <= 0} onClick={() => setDay(days.data![idx - 1]!.day)}>‹</button>
           <select value={current} onChange={(e) => setDay(Number(e.target.value))}>
-            {days.data.map((d) => (<option key={d.day} value={d.day}>{d.stage === 'regular' ? `Jornada ${d.day}` : d.stage === 'grupos' ? `Jornada ${Math.round(d.day / 2)} (día ${d.day})` : `${stageLabel(d.stage)}, día ${d.day}`}{d.played === d.total ? '' : ' (pendiente)'}</option>))}
+            {days.data.map((d) => (<option key={d.day} value={d.day}>{d.round ? `Jornada ${d.round}` : stageLabel(d.stage)}{d.date ? ` · ${fmtDate(d.date, true)}` : ''}{d.played === d.total ? '' : ' (pendiente)'}</option>))}
           </select>
           <button className="sec" disabled={idx >= days.data.length - 1} onClick={() => setDay(days.data![idx + 1]!.day)}>›</button>
         </div>
@@ -714,7 +796,7 @@ export function GameScreen({ id, nav }: { id: number; nav: Nav }) {
     <div>
       <Back onBack={nav.back} />
       <section className="hero score">
-        <div className="muted">{g.comp} · {stageLabel(g.stage)} · {g.stage === 'regular' ? `jornada ${g.day}` : g.stage === 'grupos' ? `jornada ${Math.round(g.day / 2)}` : `día ${g.day}`}</div>
+        <div className="muted">{g.comp} · {stageLabel(g.stage)} · {g.round && (g.stage === 'regular' || g.stage === 'grupos') ? `jornada ${g.round}` : ''}{g.date ? ` · ${fmtDate(g.date, true)}` : ''}</div>
         <div className="sb">
           <span className="tap" onClick={() => nav.club(g.home_id)}>{g.home}</span>
           <b>{g.home_pts} - {g.away_pts}</b>
@@ -1116,15 +1198,18 @@ type LineupRow = ReturnType<typeof Q.lineup>[number];
 const SLOT_SHORT = ['PG', 'SG', 'SF', 'PF', 'C'];
 const SLOT_LABEL = ['Base (PG)', 'Escolta (SG)', 'Alero (SF)', 'Ala-pívot (PF)', 'Pívot (C)'];
 const LEVELS: [Level, string][] = [['menos', 'Menos'], ['normal', 'Normal'], ['mas', 'Más']];
+const ROLE_LABEL: Record<string, string> = { estrella: 'Estrella', titular: 'Titular', rotacion: 'Rotación', suplente: 'Suplente', reserva: 'Reserva' };
 
 function LineupEditor({ clubId, nav }: { clubId: number; nav: Nav }) {
   const { data, error } = useData<LineupRow[]>('lineup', { clubId }, [clubId]);
   const [starters, setStarters] = useState<(number | null)[]>([null, null, null, null, null]);
   const [roles, setRoles] = useState<Record<number, Role>>({});
+  const [mins, setMins] = useState<Record<number, number | null>>({});
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     if (!data) return;
+    setMins(Object.fromEntries(data.map((p) => [p.id, p.target])));
     const st: (number | null)[] = [null, null, null, null, null];
     for (const p of data) if (p.slot !== null) st[p.slot] = p.id;
     setStarters(st);
@@ -1147,7 +1232,7 @@ function LineupEditor({ clubId, nav }: { clubId: number; nav: Nav }) {
   const save = async (st = starters, ro = roles) => {
     setErr(null);
     try {
-      await call('setLineup', { clubId, starters: st, roles: ro, shoot });
+      await call('setLineup', { clubId, starters: st, roles: ro, shoot, minutes: mins });
       setMsg('Guardado. Se aplica desde el próximo partido.');
     } catch (e) {
       setErr((e as Error).message);
@@ -1220,13 +1305,15 @@ function LineupEditor({ clubId, nav }: { clubId: number; nav: Nav }) {
         <h3>Rotación</h3>
         <div className="tbl">
           <table>
-            <thead><tr><th className="l">Jugador</th><th className="l">Minutos</th><th className="l">Perfil</th><th>Pos.</th><th>Media</th><th>MIN</th></tr></thead>
+            <thead><tr><th className="l">Jugador</th><th>Pos.</th><th>Media</th><th className="l">Papel</th><th className="l">Minutos objetivo</th><th>MIN</th><th className="l">Espera</th><th>Moral</th><th>Cansancio</th><th className="l">Perfil</th></tr></thead>
             <tbody>
               {[...starters.filter((x): x is number => x !== null).map((id) => byId.get(id)!), ...bench].map((p) => {
                 const isStarter = starters.includes(p.id);
                 return (
                   <tr key={p.id}>
                     <td className="l tap" onClick={() => nav.player(p.id)}>{isStarter ? <b>{shortName(p.name)}</b> : shortName(p.name)}{p.injury && <span className="bad"> ✚</span>}</td>
+                    <td>{p.pos1}{p.pos2 ? `/${p.pos2}` : ''}</td>
+                    <td><b className={`ovr ${ovrClass(p.ovr)}`}>{p.ovr}</b></td>
                     <td className="l">
                       {isStarter ? <span className="muted">Titular</span> : (
                         <select value={roles[p.id] ?? 'rot'} onChange={(e) => { setRoles({ ...roles, [p.id]: e.target.value as Role }); setMsg(null); }}>
@@ -1236,17 +1323,24 @@ function LineupEditor({ clubId, nav }: { clubId: number; nav: Nav }) {
                         </select>
                       )}
                     </td>
-                    <td className="l">{p.archetype.label}</td>
-                    <td>{p.pos1}{p.pos2 ? `/${p.pos2}` : ''}</td>
-                    <td>{p.ovr}</td>
+                    <td className="l">
+                      <select value={mins[p.id] ?? ''} onChange={(e) => { setMins({ ...mins, [p.id]: e.target.value === '' ? null : Number(e.target.value) }); setMsg(null); }} aria-label="Minutos objetivo">
+                        <option value="">Auto</option>
+                        {[0, 6, 10, 14, 18, 22, 26, 30, 34].map((m) => <option key={m} value={m}>{m ? `${m} min` : 'No juega'}</option>)}
+                      </select>
+                    </td>
                     <td>{p.min !== null ? f1(p.min) : '—'}</td>
+                    <td className="l muted">{ROLE_LABEL[p.expected]}</td>
+                    <td title={p.mood ?? ''}><span className={p.morale >= 60 ? 'good' : p.morale < 40 ? 'bad' : ''}>{p.morale}</span></td>
+                    <td>{p.fatigue > 0.05 ? <span className={p.fatigue > 0.4 ? 'bad' : p.fatigue > 0.2 ? 'warn' : ''}>{Math.round(p.fatigue * 100)} %</span> : '—'}</td>
+                    <td className="l">{p.archetype.label}</td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
         </div>
-        <p className="muted small">Minutos: titular, rotación, pocos minutos o fuera de la rotación. MIN: minutos por partido esta temporada. Lo que hace cada jugador cuando está en pista (cuánto tira, desde dónde, cuánto defiende) se ajusta en su ficha, pestaña «Tendencias».</p>
+        <p className="muted small">Papel: titular, rotación, pocos minutos o fuera. Minutos objetivo: el entrenador intenta darle esos minutos (los cambios automáticos lo tienen en cuenta). MIN: minutos por partido esta temporada. Espera: el papel que cree merecer; si juega mucho menos, baja su moral. Cansancio acumulado: se recupera con los días; si es alto, rinde menos y se lesiona más. Lo que hace cada jugador cuando está en pista (cuánto tira, desde dónde, cuánto defiende) se ajusta en su ficha, pestaña «Tendencias».</p>
       </section>
 
       <div className="row">

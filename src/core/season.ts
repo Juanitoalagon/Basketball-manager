@@ -8,10 +8,12 @@ import { BOX_FIELDS, type EngineTeam, type Intervention, type Level, type Role, 
 import { ROSTER_SIZE, TIER_QUALITY, generateProspect, generateRoster } from './generate';
 import { REAL_CLUBS } from './names';
 import { computeAwards } from './awards';
+import { addFatigue, aiTactics, endLoans, evaluateObjectives, individualBonus, minutesDevelopment, recoverFatigue, setObjectives, updateChemistry, updateMorale } from './club';
 import { addFreeAgents, addNews, assignClauses, ensureEconomy, offseason, rookieContract } from './market';
 import { INTENSITY, aiFillNeeds, positionNeeds, afterDay, fixRosterCupos, getTraining, scheduleEurope, setupWorld, trainingBonus, youthOffseason } from './world';
 import { Rng, mixSeed } from './rng';
-import { type Db, ENGINE_VERSION, GAME_TABLES, bumpRevision, transaction } from './schema';
+import { type Db, ENGINE_VERSION, GAME_TABLES, bumpRevision, setSetting, transaction } from './schema';
+import { dateOfDay, nextKoDay, seasonCalendar } from './calendar';
 
 export const FIRST_SEASON = 2026;
 export const COMP = { ACB: 1, FEB: 2 } as const;
@@ -94,13 +96,15 @@ export function scheduleSeason(db: Db, season: number, seed: number) {
   const rng = new Rng(mixSeed(seed, season));
   for (const comp of [COMP.ACB, COMP.FEB]) {
     const clubs = db.rows<{ id: number }>('SELECT id FROM club WHERE competition_id = ? ORDER BY id', [comp]).map((c) => c.id);
-    for (const [day, h, a] of roundRobin(clubs, rng)) {
+    const cal = seasonCalendar(season);
+    for (const [round, h, a] of roundRobin(clubs, rng)) {
       db.exec("INSERT INTO game (season, competition_id, stage, day, round, home_id, away_id, seed, status) VALUES (?,?, 'regular', ?,?,?,?,?, 'pendiente')", [
-        season, comp, day, day, h, a, rng.int(1, 2 ** 31 - 1),
+        season, comp, cal.league[round], round, h, a, rng.int(1, 2 ** 31 - 1),
       ]);
     }
   }
   db.exec("INSERT OR REPLACE INTO season (year, status) VALUES (?, 'en curso')", [season]);
+  setSetting(db, 'calendar', '2');
 }
 
 /** Crea un universo generado: Liga ACB y Primera FEB con 18 clubes ficticios cada una. */
@@ -128,13 +132,14 @@ export function createUniverse(db: Db, opts: { name: string; seed: number; id: s
     setupWorld(db);
     scheduleEurope(db, season, opts.seed);
     ensureEconomy(db);
+    seasonSetup(db, season, null, new Rng(mixSeed(opts.seed, 4711)));
     db.exec("INSERT INTO settings(key, value) VALUES ('revision', '0') ON CONFLICT(key) DO UPDATE SET value = '0'");
   });
   return getUniverse(db)!;
 }
 
 /** Quinteto y roles del club del usuario. starters: un jugador por hueco (PG..C) o null = automático. */
-export function setLineup(db: Db, clubId: number, starters: (number | null)[], roles: Record<number, Role>, shoot: Record<number, Level> = {}, tactics?: Tactics) {
+export function setLineup(db: Db, clubId: number, starters: (number | null)[], roles: Record<number, Role>, shoot: Record<number, Level> = {}, tactics?: Tactics, minutes: Record<number, number | null> = {}) {
   const ids = starters.filter((x): x is number => x !== null);
   if (new Set(ids).size !== ids.length) throw new Error('Un jugador no puede ocupar dos huecos del quinteto.');
   transaction(db, () => {
@@ -144,8 +149,9 @@ export function setLineup(db: Db, clubId: number, starters: (number | null)[], r
       const slot = starters.indexOf(pid);
       const role = slot >= 0 ? 'rot' : (roles[pid] ?? 'rot');
       const sh = shoot[pid] ?? 'normal';
-      if (slot >= 0 || role !== 'rot' || sh !== 'normal') {
-        db.exec('INSERT INTO lineup (club_id, player_id, slot, role, shoot) VALUES (?,?,?,?,?)', [clubId, pid, slot >= 0 ? slot : null, role, sh]);
+      const min = minutes[pid] ?? null;
+      if (slot >= 0 || role !== 'rot' || sh !== 'normal' || min !== null) {
+        db.exec('INSERT INTO lineup (club_id, player_id, slot, role, shoot, minutes) VALUES (?,?,?,?,?,?)', [clubId, pid, slot >= 0 ? slot : null, role, sh, min]);
       }
     }
     if (tactics) db.exec('INSERT OR REPLACE INTO tactics (club_id, data) VALUES (?,?)', [clubId, JSON.stringify(tactics)]);
@@ -160,13 +166,31 @@ export function chooseClub(db: Db, clubId: number) {
   });
 }
 
-function loadTeam(db: Db, clubId: number, season: number): EngineTeam {
+/** Objetivos, tácticas de la IA y química: al crear un universo y en partidas de versiones anteriores. */
+export function seasonSetup(db: Db, season: number, userClub: number | null, rng: Rng) {
+  setObjectives(db, season);
+  refreshAiTactics(db, season, userClub, rng);
+  updateChemistry(db, season);
+}
+
+/** La IA revisa su sistema de juego según su plantilla (al empezar la temporada y cada pocas semanas). */
+export function refreshAiTactics(db: Db, season: number, userClub: number | null, rng: Rng) {
+  for (const c of db.rows<{ id: number }>('SELECT id FROM club WHERE id IS NOT ?', [userClub])) {
+    const t = loadTeam(db, c.id, season);
+    if (!t.players.length) continue;
+    db.exec('INSERT OR REPLACE INTO tactics (club_id, data) VALUES (?,?)', [c.id, JSON.stringify(aiTactics(t.players, rng))]);
+  }
+}
+
+export function loadTeam(db: Db, clubId: number, season: number): EngineTeam {
   const rows = db.rows<Record<string, number | string | null>>(
-    `SELECT p.id, p.pos1, p.pos2, p.height_cm, p.morale, a.* FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
+    `SELECT p.id, p.pos1, p.pos2, p.height_cm, p.morale, p.fatigue, a.* FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
      WHERE p.club_id = ? AND p.retired = 0 AND p.injury_games = 0 ORDER BY a.ovr DESC LIMIT 16`,
     [season, clubId],
   );
-  const lu = db.rows<{ player_id: number; slot: number | null; role: Role; shoot: Level }>('SELECT player_id, slot, role, shoot FROM lineup WHERE club_id = ?', [clubId]);
+  const lu = db.rows<{ player_id: number; slot: number | null; role: Role; shoot: Level; minutes: number | null }>('SELECT player_id, slot, role, shoot, minutes FROM lineup WHERE club_id = ?', [clubId]);
+  const isUser = db.rows<{ u: number | null }>('SELECT user_club_id AS u FROM universe')[0]?.u === clubId;
+  const chemistry = db.rows<{ c: number }>('SELECT chemistry AS c FROM club WHERE id = ?', [clubId])[0]?.c ?? 50;
   const tac = db.rows<{ data: string }>('SELECT data FROM tactics WHERE club_id = ?', [clubId])[0];
   const ids = new Set(rows.map((r) => Number(r.id)));
   const mine = lu.filter((l) => ids.has(l.player_id));
@@ -180,7 +204,16 @@ function loadTeam(db: Db, clubId: number, season: number): EngineTeam {
   )) (tend.get(t.player_id) ?? tend.set(t.player_id, {}).get(t.player_id)!)[t.key] = t.value;
   return {
     clubId,
-    lineup: mine.length ? { starters, roles: Object.fromEntries(mine.map((l) => [l.player_id, l.role])), shoot: Object.fromEntries(mine.map((l) => [l.player_id, l.shoot])) } : undefined,
+    // El club del usuario siempre lleva «lineup» (aunque sea todo automático): así el motor sabe que no es la IA.
+    lineup: mine.length || isUser
+      ? {
+          starters,
+          roles: Object.fromEntries(mine.map((l) => [l.player_id, l.role])),
+          shoot: Object.fromEntries(mine.map((l) => [l.player_id, l.shoot])),
+          minutes: Object.fromEntries(mine.filter((l) => l.minutes !== null).map((l) => [l.player_id, l.minutes!])),
+        }
+      : undefined,
+    chemistry,
     tactics: tac ? (JSON.parse(tac.data) as Tactics) : undefined,
     players: rows.map((r) => ({
       id: Number(r.id),
@@ -190,6 +223,7 @@ function loadTeam(db: Db, clubId: number, season: number): EngineTeam {
       morale: Number(r.morale),
       attrs: Object.fromEntries(ATTR_KEYS.map((k) => [k, Number(r[k])])) as Attrs,
       tend: tend.get(Number(r.id)),
+      fatigue: Number(r.fatigue ?? 0),
     })),
   };
 }
@@ -248,6 +282,10 @@ export function advanceDay(db: Db, opts: { interventions?: Intervention[]; liveG
       next = db.rows<{ d: number | null }>("SELECT MIN(day) AS d FROM game WHERE season = ? AND status = 'pendiente'", [season])[0]?.d ?? null;
     }
     if (next === null) throw new Error('No quedan partidos pendientes.');
+    // Recuperación del cansancio por los días de calendario que pasan.
+    const prevDate = u.game_day ? dateOfDay(season, u.game_day) : null;
+    const nextDate = dateOfDay(season, next);
+    if (prevDate && nextDate) recoverFatigue(db, Math.round((Date.parse(nextDate) - Date.parse(prevDate)) / 86_400_000));
 
     const games = db.rows<{ id: number; competition_id: number; stage: string; home_id: number; away_id: number; seed: number; series_id: number | null }>(
       "SELECT id, competition_id, stage, home_id, away_id, seed, series_id FROM game WHERE season = ? AND day = ? AND status = 'pendiente' ORDER BY id",
@@ -265,6 +303,7 @@ export function advanceDay(db: Db, opts: { interventions?: Intervention[]; liveG
       const r = simulateGame(loadTeam(db, g.home_id, season), loadTeam(db, g.away_id, season), mixSeed(u.seed, g.seed), { pbp: isUser, interventions: isUser && g.id === liveId ? opts.interventions : undefined });
       saveGame(db, g, season, r);
       afterGame(db, g, r, u.user_club_id, mixSeed(u.seed, g.seed + 17));
+      addFatigue(db, r.box);
       stagesPlayed.add(g.stage);
       compsPlayed.add(g.competition_id);
       if (isUser) {
@@ -277,12 +316,17 @@ export function advanceDay(db: Db, opts: { interventions?: Intervention[]; liveG
     let seasonOver = false;
     events.push(...afterDay(db, season, next, u.seed, stagesPlayed, compsPlayed));
     if (stagesPlayed.has('playoffs')) {
-      const res = scheduleKnockout(db, season, COMP.ACB, next + 1, u.seed, next);
+      const res = scheduleKnockout(db, season, COMP.ACB, nextKoDay(season, COMP.ACB, next), u.seed, next);
       events.push(...res.events);
       if (res.finished) {
         db.exec("UPDATE universe SET phase = 'fin'");
         db.exec("UPDATE season SET status = 'cerrada' WHERE year = ?", [season]);
         events.push(...computeAwards(db, season));
+        events.push(...evaluateObjectives(db, season, u.user_club_id));
+        if (u.user_club_id) {
+          const exp = db.rows<{ name: string }>('SELECT p.name FROM contract c JOIN player p ON p.id = c.player_id WHERE c.club_id = ? AND c.until <= ?', [u.user_club_id, season]).map((x) => x.name);
+          if (exp.length) addNews(db, 'contrato', `Terminan contrato: ${exp.join(', ')}. Renueva en Equipo › Finanzas a quien quieras conservar antes de empezar la temporada.`, u.user_club_id, null, { type: 'finanzas' });
+        }
         seasonOver = true;
       }
     }
@@ -322,14 +366,13 @@ function afterGame(db: Db, g: GameRow, r: ReturnType<typeof simulateGame>, userC
        WHERE p.club_id = ? AND p.retired = 0 ORDER BY a.ovr DESC`,
       [club],
     );
-    roster.forEach((p, rank) => {
+    updateMorale(db, club, won, inten.morale, userClub);
+    const fat = new Map(db.rows<{ id: number; fatigue: number }>('SELECT id, fatigue FROM player WHERE club_id = ?', [club]).map((x) => [x.id, x.fatigue]));
+    roster.forEach((p) => {
       const box = r.box.get(p.id);
       const min = box ? box[0]! / 60 : 0;
-      const expected = rank < 5 ? 26 : rank < 8 ? 16 : rank < 10 ? 8 : 2;
-      let m = p.morale + (won ? 3 : -3) + Math.max(-2, Math.min(2, (min - expected) / 6)) + inten.morale;
-      m += (70 - m) * 0.05;
-      db.exec('UPDATE player SET morale = ? WHERE id = ?', [Math.round(Math.max(0, Math.min(100, m))), p.id]);
-      if (min > 0 && rng.chance(0.015 * inten.injury * (min / 30) * (1.25 - p.sta / 200))) {
+      // El cansancio acumulado multiplica el riesgo de lesión (hasta ×2,2 reventado).
+      if (min > 0 && rng.chance(0.015 * inten.injury * (min / 30) * (1.25 - p.sta / 200) * (1 + 1.2 * (fat.get(p.id) ?? 0)))) {
         const total = INJURIES.reduce((a, x) => a + x[0], 0);
         let x = rng.next() * total;
         const inj = INJURIES.find((i) => (x -= i[0]) < 0) ?? INJURIES[0]!;
@@ -337,7 +380,7 @@ function afterGame(db: Db, g: GameRow, r: ReturnType<typeof simulateGame>, userC
         db.exec('UPDATE player SET injury_games = ?, injury = ? WHERE id = ?', [games, inj[2], p.id]);
         if (club === userClub || games >= 10) {
           const cname = db.rows<{ name: string }>('SELECT name FROM club WHERE id = ?', [club])[0]!.name;
-          addNews(db, 'lesion', `${p.name} (${cname}): ${inj[2].toLowerCase()}. Baja de ${games} ${games === 1 ? 'partido' : 'partidos'}.`, club, p.id);
+          addNews(db, 'lesion', `${p.name} (${cname}): ${inj[2].toLowerCase()}. Baja de ${games} ${games === 1 ? 'partido' : 'partidos'}.`, club, p.id, { type: 'player', id: p.id });
         }
       }
     });
@@ -429,8 +472,9 @@ function closeRegularSeason(db: Db, season: number): string[] {
     ]);
   });
   const lastDay = db.rows<{ d: number }>('SELECT MAX(day) AS d FROM game WHERE season = ?', [season])[0]!.d;
+  const firstPo = seasonCalendar(season).playoffs.find((d) => d > lastDay) ?? lastDay + 1;
   const u = getUniverse(db)!;
-  scheduleKnockout(db, season, COMP.ACB, lastDay + 1, u.seed);
+  scheduleKnockout(db, season, COMP.ACB, firstPo, u.seed);
   return ev;
 }
 
@@ -446,9 +490,8 @@ const ROUND_NAME: Record<number, string> = { 1: 'cuartos de final', 2: 'semifina
 const KO_STAGE: Record<number, string> = { 1: 'playoffs', 3: 'copa', 4: 'eliminatoria', 5: 'eliminatoria', 6: 'eliminatoria' };
 const COMP_NAME: Record<number, string> = { 1: 'la Liga ACB', 3: 'la Copa del Rey', 4: 'la EuroLeague', 5: 'la EuroCup', 6: 'la Basketball Champions League' };
 /** Día del siguiente partido de una eliminatoria: la ACB y la Copa juegan días seguidos; Europa, días 30, 32 y 33. */
-export function koNextDay(comp: number, day: number): number {
-  if (comp >= 4) return day < 32 ? day + 2 : day + 1;
-  return day + 1;
+export function koNextDay(comp: number, day: number, season = 0): number {
+  return nextKoDay(season, comp, day);
 }
 
 /**
@@ -521,6 +564,11 @@ export function startNewSeason(db: Db): { season: number; retired: number; prosp
     db.exec('UPDATE club SET competition_id = ? WHERE id = ?', [COMP.FEB, down.club_id]);
     db.exec('UPDATE club SET competition_id = ? WHERE id = ?', [COMP.ACB, up.club_id]);
     events.push(`${up.name} sube a la ACB; ${down.name} baja a la Primera FEB.`);
+    // Los cedidos vuelven a su club antes de la evolución y de los contratos.
+    endLoans(db, u.user_club_id, events);
+    // Minutos por partido de la temporada que acaba (para el desarrollo de los jóvenes).
+    const mpgOf = new Map(db.rows<{ player_id: number; m: number }>('SELECT player_id, SUM(sec) / 60.0 / MAX(1, SUM(gp)) AS m FROM player_season_stats WHERE season = ? GROUP BY player_id', [old]).map((x) => [x.player_id, x.m]));
+    const plans = new Map(db.rows<{ player_id: number; plan: string }>('SELECT player_id, plan FROM player_training').map((x) => [x.player_id, x.plan]));
 
     const clubTraining = new Map(db.rows<{ id: number; facilities: number }>('SELECT id, facilities FROM club').map((c) => [c.id, { t: getTraining(db, c.id), facilities: c.facilities }]));
     const players = db.rows<Record<string, number | string | null>>(
@@ -546,6 +594,16 @@ export function startNewSeason(db: Db): { season: number; retired: number; prosp
       // Entrenamiento e instalaciones del club (o de la cantera).
       const ct = clubTraining.get(Number(r.club_id ?? r.youth ?? 0));
       if (ct) next = trainingBonus(next, age, ct.t, ct.facilities, rng);
+      // Plan individual (si lo tiene) y desarrollo según los minutos jugados.
+      const plan = plans.get(Number(r.id));
+      if (plan && ct) {
+        next = individualBonus(next, plan, age, INTENSITY[ct.t.intensity].dev * (1 + 0.15 * (ct.facilities - 3)), rng);
+        if (plan.startsWith('pos:')) {
+          const target = plan.slice(4) as Pos;
+          if (target !== r.pos1) db.exec('UPDATE player SET pos2 = ? WHERE id = ?', [target, r.id]);
+        }
+      }
+      if (r.club_id !== null) next = minutesDevelopment(next, r.pos1 as Pos, age, mpgOf.has(Number(r.id)) ? mpgOf.get(Number(r.id))! : 0, rng);
       const nOvr = overall(next, r.pos1 as Pos, Number(r.height_cm));
       saveAttrs(db, Number(r.id), season, next, nOvr);
       const pot = age >= 27 ? nOvr : Math.max(nOvr, Number(r.potential));
@@ -579,6 +637,10 @@ export function startNewSeason(db: Db): { season: number; retired: number; prosp
     setupWorld(db);
     scheduleEurope(db, season, u.seed);
     db.exec("UPDATE universe SET game_season = ?, game_day = 0, phase = 'regular'", [season]);
+    db.exec('UPDATE player SET fatigue = 0');
+    setObjectives(db, season);
+    refreshAiTactics(db, season, u.user_club_id, rng);
+    updateChemistry(db, season);
     assignClauses(db);
     bumpRevision(db);
     events.push(`${retired} jugadores se retiran y ${prospects} jóvenes suben de las canteras.`);

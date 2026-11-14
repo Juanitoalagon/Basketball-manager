@@ -4,6 +4,7 @@
  *
  * Todo es determinista a partir de la semilla del universo y del día.
  */
+import { leagueRoundPlayed } from './calendar';
 import { Rng, mixSeed } from './rng';
 import { type Db, bumpRevision, transaction } from './schema';
 import { getUniverse, freeNumber } from './season';
@@ -28,7 +29,7 @@ export const MARKET_DEADLINE = 30;
 export function windowState(db: Db): WindowState {
   const u = getUniverse(db)!;
   if (u.phase === 'fin' || u.phase === 'eleccion' || (u.phase === 'regular' && u.game_day === 0)) return { open: true, name: 'verano', label: 'Mercado de verano abierto' };
-  if (u.phase === 'regular' && u.game_day < MARKET_DEADLINE) return { open: true, name: 'temporada', label: `Mercado abierto hasta la jornada ${MARKET_DEADLINE} (cierra al jugar la ${MARKET_DEADLINE + 1})` };
+  if (u.phase === 'regular' && leagueRoundPlayed(db, u.game_season) < MARKET_DEADLINE) return { open: true, name: 'temporada', label: `Mercado abierto hasta la jornada ${MARKET_DEADLINE} (cierra al jugar la ${MARKET_DEADLINE + 1})` };
   if (u.phase === 'regular') return { open: false, name: null, label: 'Mercado de traspasos cerrado hasta el verano (cerró tras la jornada 30)' };
   return { open: false, name: null, label: 'Mercado cerrado durante los playoffs' };
 }
@@ -201,7 +202,7 @@ export function aiMarketDay(db: Db, seed: number): string[] {
   const rng = new Rng(mixSeed(seed, u.game_season * 977 + u.game_day * 13));
   if (u.user_club_id) {
     const mine = db.rows<{ id: number; ovr: number }>(
-      'SELECT p.id, a.ovr FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ? WHERE p.club_id = ? AND p.retired = 0 ORDER BY a.ovr DESC',
+      'SELECT p.id, a.ovr FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ? WHERE p.club_id = ? AND p.retired = 0 AND p.id NOT IN (SELECT player_id FROM loan) ORDER BY a.ovr DESC',
       [u.game_season, u.user_club_id],
     );
     const pending = db.rows<{ n: number }>("SELECT COUNT(*) AS n FROM market_offer WHERE status = 'pendiente' AND to_club = ?", [u.user_club_id])[0]!.n;
@@ -226,9 +227,9 @@ export function aiMarketDay(db: Db, seed: number): string[] {
         const fee = round(e.value * (0.8 + rng.next() * 0.35), 5_000);
         if (fee > c.cash) continue;
         db.exec("INSERT INTO market_offer (season, day, player_id, from_club, to_club, fee, status, expires_day, note) VALUES (?,?,?,?,?,?, 'pendiente', ?, ?)", [
-          u.game_season, u.game_day, target.id, c.id, u.user_club_id, fee, u.game_day + 3, String(round(fee * (1.08 + rng.next() * 0.14), 5_000)),
+          u.game_season, u.game_day, target.id, c.id, u.user_club_id, fee, u.game_day + 6, String(round(fee * (1.08 + rng.next() * 0.14), 5_000)),
         ]);
-        addNews(db, 'oferta', `${c.name} ofrece ${eur(fee)} por ${e.name}.`, u.user_club_id, target.id);
+        addNews(db, 'oferta', `${c.name} ofrece ${eur(fee)} por ${e.name}. Responde en su ficha.`, u.user_club_id, target.id, { type: 'player', id: target.id });
         ev.push(`Oferta: ${c.name} ofrece ${eur(fee)} por ${e.name}. Responde en Jugadores › Ofertas o en su ficha.`);
         break;
       }
@@ -294,7 +295,7 @@ function aiTransfers(db: Db, rng: Rng, max: number): string[] {
     const pos = (['PG', 'SG', 'SF', 'PF', 'C'] as const).reduce((a, p) => ((best[p] ?? 0) < (best[a] ?? 0) ? p : a), 'PG' as string);
     const cands = db.rows<{ id: number; club_id: number; ovr: number }>(
       `SELECT p.id, p.club_id, a.ovr FROM player p JOIN player_attributes a ON a.player_id = p.id AND a.season = ?
-       WHERE p.pos1 = ? AND p.club_id IS NOT NULL AND p.club_id NOT IN (?, ?) AND p.retired = 0 AND p.injury_games = 0 AND a.ovr >= ? ORDER BY a.ovr ASC LIMIT 8`,
+       WHERE p.pos1 = ? AND p.club_id IS NOT NULL AND p.club_id NOT IN (?, ?) AND p.retired = 0 AND p.injury_games = 0 AND a.ovr >= ? AND p.id NOT IN (SELECT player_id FROM loan) ORDER BY a.ovr ASC LIMIT 8`,
       [u.game_season, pos, b.id, u.user_club_id ?? -1, (best[pos] ?? 0) + 3],
     );
     for (const c of cands) {
